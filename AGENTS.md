@@ -17,16 +17,27 @@ Core idea: define metrics once (via the `Metrics` trait), reuse them for benchma
 2. **Collector** (`src/lib.rs`) — a `tracing_subscriber::Layer` that snapshots metrics on span enter/exit and stores `ProfileEntry` events in a queue. Used for production-style tracing profiling.
 
 3. **Bench** (`src/bench.rs`) — benchmark runner.
-   - `Bench<M>` — benchmark builder with `.group()` / `.name()` / `.run()` API.
-   - `BenchRunner<M>` — orchestrates benchmark execution, creates `Bench` instances.
-   - `bench_main!` macro — generates `fn main()` that runs registered benchmarks.
+   - `Bencher` — benchmark builder with `.group()` / `.name()` / `.run()` / `.warmup_seconds()` / `.num_iters()` / `.min_run_time()` API.
+   - `BenchConfig` — per-benchmark configuration: `warmup_seconds` (default 3), `num_iters` (default 1), `min_run_time` (default 1 ns), `group_name`.
+   - `NamedBench` — pairs a name + config + closure (`Box<dyn FnMut(Span)>`).
+   - `BenchRunner<M>` — orchestrates benchmark execution in two phases (warmup → measured), drains `Collector` and builds `Report`.
+   - `IterScope` — helper enum for separating setup/measured phases (defined, not yet integrated).
 
-4. **Report** (`src/report.rs`) — formats and displays benchmark results (mean, stddev, min, max), with optional comparison to previous runs.
+4. **Bench helpers** (`src/bench_helper.rs`) — polymorphic benchmark registration.
+   - `WrapFn<T>` — newtype wrapper around a function/closure.
+   - `BenchFn` trait — provides `.parse(name) → Vec<NamedBench>`. Two impls:
+     - `Fn() -> R` — simple single-function benchmark.
+     - `Fn(&mut Bencher)` — grouped benchmark (caller populates `Bencher` with multiple `.run()` calls).
+
+5. **Report** (`src/report.rs`) — aggregates and displays benchmark results.
+   - `MetricStats` — per-metric statistics: mean, stddev, min, max, median, spread.
+   - `SpanNode` — internal node in a hierarchical span tree (name, samples, children).
+   - `Report` — built from `ProfileEntry` events via `Report::from_profile_entries()`. Prints a tree of spans with per-metric stats and ANSI-formatted terminal output.
 
 ### Data flow
 
 ```
-  register_metrics! → MetricsProvider : Metrics
+  MetricsProvider::default() → M : Metrics
                           │
                       Arc<M> (shared)
                           │
@@ -36,17 +47,32 @@ Core idea: define metrics once (via the `Metrics` trait), reuse them for benchma
         ┌─────────────────┴─────────────────┐
         │                                   │
    BenchRunner<M>                     Production use
-   (orchestrates iterations,          (install as global
-    wraps each in a tracing span)      subscriber layer)
+   (two-phase execution)             (install as global
+        │                              subscriber layer)
         │                                   │
-        ▼                                   ▼
-   Collector::drain()               Collector::drain()
-   → Vec<ProfileEntry>             or channel → consumer thread
+   WrapFn(fn).parse("name")                 ▼
+   → Vec<NamedBench>                 Collector::drain()
+   → runner.register(benches)        or channel → consumer
         │
         ▼
-     Report
-   (stats, terminal table,
-    optional comparison)
+   Phase 1: Warmup
+   (collector NOT installed,
+    runs warmup_seconds)
+        │
+        ▼
+   Phase 2: Measured
+   (collector installed,
+    runs num_iters with min_run_time)
+        │
+        ▼
+   Collector::drain()
+   → Vec<ProfileEntry>
+        │
+        ▼
+   Report::from_profile_entries()
+   → hierarchical span tree
+   → Report::print()
+   (ANSI terminal table)
 ```
 
 ## Conventions
@@ -55,6 +81,7 @@ Core idea: define metrics once (via the `Metrics` trait), reuse them for benchma
 - **tracing integration** — use `tracing::info_span!` / `#[tracing::instrument]` for marking regions. The `Collector` layer captures them automatically.
 - **perf_event** — Linux-only perf counters are exposed through `PerfEventMetric`. Counters are per-thread (via `ThreadLocal`).
 - **No allocations in hot path** — benchmark measurement loop should avoid heap allocation. The `Metrics::start()` / `end()` calls should be cheap.
+- **Two-phase benchmark execution** — warmup (collector not installed, `warmup_seconds`) followed by measured phase (collector installed, `num_iters` iterations with `min_run_time` floor). Warmup warms JIT/caches; measured phase captures actual profiling data.
 - Rust edition 2024, stable toolchain.
 
 ## File layout
@@ -62,10 +89,11 @@ Core idea: define metrics once (via the `Metrics` trait), reuse them for benchma
 ```
 src/
   lib.rs              — Metrics trait, Collector, PerfEventMetric, InstantProvider
-  bench.rs            — Bench, BenchGroup, BenchRunner, bench_main! macro
-  report.rs           — BenchmarkResult, Report, statistics, terminal formatting
+  bench.rs            — Bencher, BenchConfig, NamedBench, BenchRunner, IterScope
+  bench_helper.rs     — WrapFn, BenchFn trait (polymorphic benchmark registration)
+  report.rs           — MetricStats, SpanNode, Report, ANSI terminal formatting
   expanded_macro.rs   — hand-expanded MetricsProvider (future: generated by derive)
-  example.rs          — usage example (compilable)
+  example.rs          — usage example (registered as [[example]] name = "basic")
 ```
 
 ## Adding a new metric source

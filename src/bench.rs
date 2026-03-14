@@ -155,7 +155,6 @@ where
 
     /// Register a benchmark function that receives `&mut Bencher<M>`.
     pub fn register(&mut self, named_bench: Vec<NamedBench>) {
-        dbg!(&named_bench);
         self.benchmarks.extend(named_bench);
     }
 
@@ -163,19 +162,20 @@ where
     pub fn run_all(mut self) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        self.benchmarks
+            .sort_by(|a, b| (&a.config.group_name, &a.name).cmp(&(&b.config.group_name, &b.name)));
+
+        let mut reports: Vec<Report> = Vec::new();
+
         for NamedBench { name, func, config } in &mut self.benchmarks {
             // Phase 1: Warmup — collector NOT installed as subscriber.
-            // (No tracing overhead, no stale entries.)
             let subscriber = tracing_subscriber::registry().with(self.collector.clone());
             let _guard = tracing::subscriber::set_default(subscriber);
-            {
-                for _ in 0..config.warmup_seconds {
-                    func(black_box(
-                        tracing::info_span!(target: "profiler", "bench", name = name),
-                    ));
-                }
+            for _ in 0..config.warmup_seconds {
+                func(black_box(
+                    tracing::info_span!(target: "profiler", "bench", name = name),
+                ));
             }
-            // cleanup any entries from warmup phase.
             let _ = self.collector.drain();
 
             // Phase 2: Measured — install collector for the measurement window.
@@ -190,12 +190,22 @@ where
                     }
                 }
             }
+
+            let entries = self.collector.drain();
+            let metrics = self.collector.metrics();
+            let report = Report::from_profile_entries(
+                &entries,
+                metrics.as_ref(),
+                config.group_name.clone(),
+                name.clone(),
+            );
+            if let Err(error) = report.write_json_to_default_path() {
+                eprintln!("Failed to save baseline JSON for {}: {}", name, error);
+            }
+            reports.push(report);
         }
 
-        let entries = self.collector.drain();
-        let metrics = self.collector.metrics();
-        let report = Report::from_profile_entries(&entries, metrics.as_ref());
-        report.print();
+        Report::print_all(&reports);
     }
 }
 

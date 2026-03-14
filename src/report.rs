@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt::Debug,
+    fs::{self, File},
+    io,
+    path::{Path, PathBuf},
+};
+
+use serde::Serialize;
 use tracing::Id;
 
 use crate::{Metrics, ProfileEntry};
@@ -14,7 +22,7 @@ struct SpanNode {
 }
 
 /// Statistics for one metric across samples.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize)]
 pub struct MetricStats {
     pub mean: f64,
     pub stddev: f64,
@@ -38,7 +46,7 @@ impl MetricStats {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let min = sorted[0];
         let max = *sorted.last().unwrap();
-        let median = if sorted.len() % 2 == 0 {
+        let median = if sorted.len().is_multiple_of(2) {
             let m = sorted.len() / 2;
             (sorted[m - 1] + sorted[m]) / 2.0
         } else {
@@ -67,11 +75,47 @@ impl MetricStats {
 // ── Report ─────────────────────────────────────────────────────
 
 pub struct Report {
+    group_name: Option<String>,
+    bench_name: String,
     metric_names: Vec<String>,
     /// Aggregated nodes keyed by path string ("root/child/grandchild").
     nodes: HashMap<String, SpanNode>,
     /// Root keys in insertion order.
     roots: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct JsonReport {
+    schema_version: u32,
+    group: Option<String>,
+    name: String,
+    metric_names: Vec<String>,
+    roots: Vec<JsonSpanNode>,
+}
+
+#[derive(Serialize)]
+struct JsonSpanNode {
+    name: String,
+    samples: usize,
+    metrics: BTreeMap<String, MetricStats>,
+    children: Vec<JsonSpanNode>,
+}
+
+const LABEL_W: usize = 34;
+const COL_W: usize = 20;
+const COL_GAP: usize = 5;
+
+/// Width of the full table for `n_metrics` columns. Use this when printing
+/// separators outside of `Report::print()` (e.g. in the bench runner).
+pub fn table_width(n_metrics: usize) -> usize {
+    LABEL_W + (COL_W + COL_GAP) * n_metrics
+}
+
+#[derive(Clone, Copy)]
+struct PrintLayout {
+    label_w: usize,
+    col_w: usize,
+    col_gap: usize,
 }
 
 impl Report {
@@ -83,6 +127,8 @@ impl Report {
     pub fn from_profile_entries<M: Metrics>(
         entries: &[ProfileEntry<M::Start, M::Result>],
         metrics: &M,
+        group_name: Option<String>,
+        bench_name: String,
     ) -> Self
     where
         M::Result: Debug,
@@ -94,7 +140,6 @@ impl Report {
             .map(|s| s.to_string())
             .collect();
 
-        dbg!(&entries);
         // Phase 1: map span Id → (name, parent_id) from Register entries.
         let mut span_info: HashMap<Id, (String, Option<Id>)> = HashMap::new();
         for entry in entries {
@@ -105,9 +150,12 @@ impl Report {
                 ..
             } = entry
             {
-                span_info
-                    .entry(id.clone())
-                    .or_insert((metadata.unwrap().name().to_string(), parent.clone()));
+                span_info.entry(id.clone()).or_insert((
+                    metadata
+                        .map(|meta| meta.name().to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    parent.clone(),
+                ));
             }
         }
 
@@ -144,8 +192,7 @@ impl Report {
         // Phase 3: aggregate Publish entries by key.
         let mut nodes: HashMap<String, SpanNode> = HashMap::new();
         let mut roots: Vec<String> = Vec::new();
-        // Maintain insertion-order for children.
-        let mut root_set: HashMap<String, ()> = HashMap::new();
+        let mut root_set: HashSet<String> = HashSet::new();
 
         for entry in entries {
             if let ProfileEntry::Publish { id, result } = entry {
@@ -153,7 +200,10 @@ impl Report {
                     Some(k) => k.clone(),
                     None => continue,
                 };
-                let (name, _) = span_info.get(id).unwrap();
+                let (name, _) = match span_info.get(id) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let values = metrics.result_to_f64s(result);
 
                 nodes
@@ -170,22 +220,36 @@ impl Report {
                 let parts: Vec<&str> = key.rsplitn(2, '/').collect();
                 if parts.len() == 2 {
                     let parent_key = parts[1].to_string();
-                    if let Some(pnode) = nodes.get_mut(&parent_key) {
-                        if !pnode.children.contains(&key) {
-                            pnode.children.push(key.clone());
-                        }
+                    let parent_name = parent_key
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(parent_key.as_str())
+                        .to_string();
+                    let pnode = nodes.entry(parent_key.clone()).or_insert_with(|| SpanNode {
+                        name: parent_name,
+                        samples: Vec::new(),
+                        children: Vec::new(),
+                    });
+                    if !pnode.children.contains(&key) {
+                        pnode.children.push(key.clone());
                     }
                 } else {
                     // This is a root.
-                    if !root_set.contains_key(&key) {
-                        root_set.insert(key.clone(), ());
+                    if root_set.insert(key.clone()) {
                         roots.push(key.clone());
                     }
                 }
             }
         }
 
+        roots.sort();
+        for node in nodes.values_mut() {
+            node.children.sort();
+        }
+
         Self {
+            group_name,
+            bench_name,
             metric_names,
             nodes,
             roots,
@@ -199,22 +263,137 @@ impl Report {
         }
 
         let n_metrics = self.metric_names.len();
-        let col_w = 26;
+        let layout = PrintLayout {
+            label_w: LABEL_W,
+            col_w: COL_W,
+            col_gap: COL_GAP,
+        };
+        let sep = "─".repeat(table_width(n_metrics));
 
-        // Header
-        print!("\x1b[1m{:<30}", "span");
+        // Table header
+        print!("{:<label_w$}", "", label_w = layout.label_w);
         for name in &self.metric_names {
-            print!("{:>w$}", name, w = col_w);
+            print!(
+                "{:gap$}{:>w$}",
+                "",
+                name,
+                gap = layout.col_gap,
+                w = layout.col_w
+            );
         }
         println!("\x1b[0m");
-        println!("{}", "─".repeat(30 + col_w * n_metrics));
+        println!("{}", sep);
 
-        for root_key in &self.roots {
-            self.print_node(root_key, 0, n_metrics, col_w);
+        for (idx, root_key) in self.roots.iter().enumerate() {
+            self.print_node(root_key, "", idx + 1 == self.roots.len(), true, layout);
         }
     }
 
-    fn print_node(&self, key: &str, depth: usize, n_metrics: usize, col_w: usize) {
+    /// Print a collection of reports grouped, with group headers and separators.
+    /// All output lives here — callers just pass in the reports.
+    pub fn print_all(reports: &[Self]) {
+        if reports.is_empty() {
+            return;
+        }
+        let n_metrics = reports[0].metric_names.len();
+        let w = table_width(n_metrics);
+        // let thick = "─".repeat(w);
+        let thin = "- ".repeat(w / 2).trim_end().to_string();
+
+        let mut current_group: Option<&Option<String>> = None;
+        let mut bench_index_in_group: usize = 0;
+
+        for report in reports {
+            let group = &report.group_name;
+            if current_group != Some(group) {
+                if let Some(g) = group {
+                    // println!("\n{}", thick);
+                    println!("Group: \x1b[1;33m{}\x1b[0m", g);
+                    // println!("{}", thick);
+                }
+                current_group = Some(group);
+                bench_index_in_group = 0;
+            } else if bench_index_in_group > 0 {
+                println!("{}", thin);
+            }
+            report.print();
+            bench_index_in_group += 1;
+        }
+    }
+
+    pub fn write_json_to_default_path(&self) -> io::Result<PathBuf> {
+        let mut path = PathBuf::from("target").join("profiler");
+        if let Some(group) = &self.group_name {
+            path = path.join(sanitize_path_segment(group));
+        }
+        path = path
+            .join(sanitize_path_segment(&self.bench_name))
+            .join("run.json");
+        self.write_json(&path)?;
+        Ok(path)
+    }
+
+    pub fn write_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let report = self.to_json();
+        let file = File::create(path)?;
+        serde_json::to_writer_pretty(file, &report).map_err(io::Error::other)
+    }
+
+    fn to_json(&self) -> JsonReport {
+        let roots = self
+            .roots
+            .iter()
+            .filter_map(|root| self.to_json_node(root))
+            .collect();
+
+        JsonReport {
+            schema_version: 1,
+            group: self.group_name.clone(),
+            name: self.bench_name.clone(),
+            metric_names: self.metric_names.clone(),
+            roots,
+        }
+    }
+
+    fn to_json_node(&self, key: &str) -> Option<JsonSpanNode> {
+        let node = self.nodes.get(key)?;
+
+        if node.samples.is_empty() {
+            return None;
+        }
+
+        let stats = self.compute_metric_stats(node);
+        let mut metrics = BTreeMap::new();
+        for (metric_name, stat) in self.metric_names.iter().zip(stats.iter()) {
+            metrics.insert(metric_name.clone(), stat.clone());
+        }
+
+        let children = node
+            .children
+            .iter()
+            .filter_map(|child_key| self.to_json_node(child_key))
+            .collect();
+
+        Some(JsonSpanNode {
+            name: node.name.clone(),
+            samples: node.samples.len(),
+            metrics,
+            children,
+        })
+    }
+
+    fn print_node(
+        &self,
+        key: &str,
+        prefix: &str,
+        is_last: bool,
+        is_root: bool,
+        layout: PrintLayout,
+    ) {
         let node = match self.nodes.get(key) {
             Some(n) => n,
             None => return,
@@ -224,52 +403,115 @@ impl Report {
             return;
         }
 
-        let stats: Vec<MetricStats> = (0..n_metrics)
-            .map(|j| {
-                let vals: Vec<f64> = node.samples.iter().map(|s| s[j]).collect();
+        let stats = self.compute_metric_stats(node);
+
+        let n_samples = node.samples.len();
+        let branch = if is_root {
+            ""
+        } else if is_last {
+            "└── "
+        } else {
+            "├── "
+        };
+        let node_display_name = if is_root {
+            self.bench_name.as_str()
+        } else {
+            node.name.as_str()
+        };
+        let label = format!("{}{}{}  ({})", prefix, branch, node_display_name, n_samples);
+
+        // Row 1: name(count) and mean ± spread%
+        print!(
+            "\x1b[1m{:<label_w$}\x1b[0m",
+            label,
+            label_w = layout.label_w
+        );
+        for s in &stats {
+            let (val, unit) = format_auto(s.mean);
+            let spread_pct = s.spread() * 100.0;
+            let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
+            print!(
+                "{:gap$}{:>w$}",
+                "",
+                cell,
+                gap = layout.col_gap,
+                w = layout.col_w
+            );
+        }
+        println!();
+
+        // Row 2: compact [min..max]
+        {
+            let detail_tree = if is_root {
+                String::new()
+            } else {
+                format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+            };
+            print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
+            for s in &stats {
+                let range = format_compact_range(s.min, s.max);
+                let cell = format!("\x1b[2m{}\x1b[0m", range);
+                let padding = layout.col_w.saturating_sub(range.len());
+                print!(
+                    "{:gap$}{:>pad$}{}",
+                    "",
+                    "",
+                    cell,
+                    gap = layout.col_gap,
+                    pad = padding
+                );
+            }
+            println!();
+        }
+
+        let next_prefix = if is_root {
+            String::new()
+        } else {
+            format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+        };
+
+        for (idx, child_key) in node.children.iter().enumerate() {
+            self.print_node(
+                child_key,
+                &next_prefix,
+                idx + 1 == node.children.len(),
+                false,
+                layout,
+            );
+        }
+    }
+
+    fn compute_metric_stats(&self, node: &SpanNode) -> Vec<MetricStats> {
+        let n_metrics = self.metric_names.len();
+        (0..n_metrics)
+            .map(|metric_idx| {
+                let vals: Vec<f64> = node
+                    .samples
+                    .iter()
+                    .filter_map(|sample| sample.get(metric_idx).copied())
+                    .collect();
                 MetricStats::from_values(&vals)
             })
-            .collect();
-
-        let indent = "  ".repeat(depth);
-        let n_samples = node.samples.len();
-
-        // Row 1: name(count)  mean ± spread%
-        {
-            let label = format!("{}{}  ({})", indent, node.name, n_samples);
-            print!("\x1b[1m{:<30}\x1b[0m", label);
-            for s in &stats {
-                let (val, unit) = format_auto(s.mean);
-                let spread_pct = s.spread() * 100.0;
-                let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
-                print!("{:>w$}", cell, w = col_w);
-            }
-            println!();
-        }
-
-        // Row 2: [min .. median .. max]
-        {
-            print!("{:<30}", "");
-            for s in &stats {
-                let (lo, u1) = format_auto(s.min);
-                let (md, u2) = format_auto(s.median);
-                let (hi, u3) = format_auto(s.max);
-                let range = format!("[{}{} .. {}{} .. {}{}]", lo, u1, md, u2, hi, u3);
-                let cell = format!("\x1b[2m{}\x1b[0m", range);
-                let padding = col_w.saturating_sub(range.len());
-                print!("{:>pad$}{}", "", cell, pad = padding);
-            }
-            println!();
-        }
-
-        // Children
-        for child_key in &node.children {
-            self.print_node(child_key, depth + 1, n_metrics, col_w);
-        }
+            .collect()
     }
 }
 
 // ── Formatting helpers ─────────────────────────────────────────
+
+fn sanitize_path_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unnamed".to_string()
+    } else {
+        sanitized
+    }
+}
 
 fn format_auto(value: f64) -> (String, &'static str) {
     if value >= 1_000_000_000.0 {
@@ -282,5 +524,20 @@ fn format_auto(value: f64) -> (String, &'static str) {
         (format!("{:.1}", value), "")
     } else {
         (format!("{:.3}", value), "")
+    }
+}
+
+fn format_compact_range(min: f64, max: f64) -> String {
+    let (lo, u1) = format_auto(min);
+    let (hi, u2) = format_auto(max);
+
+    if u1 == u2 {
+        if u1.is_empty() {
+            format!("[{} .. {}]", lo, hi)
+        } else {
+            format!("[{} .. {}{}]", lo, hi, u1)
+        }
+    } else {
+        format!("[{}{} .. {}{}]", lo, u1, hi, u2)
     }
 }

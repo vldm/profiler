@@ -5,6 +5,8 @@ pub struct MetricsProvider {
     // same value as in perf_event::Builder::kind argument
     // #[perf_kind(Hardware::BRANCH_INSTRUCTIONS)]
     pub instructions: crate::PerfEventMetric,
+
+    pub cycles: crate::PerfEventMetric,
 }
 
 impl Default for MetricsProvider {
@@ -15,6 +17,7 @@ impl Default for MetricsProvider {
                 perf_event::events::Hardware::BRANCH_INSTRUCTIONS,
             ),
             task_clock: crate::PerfEventMetric::new(perf_event::events::Software::TASK_CLOCK),
+            cycles: crate::PerfEventMetric::new(perf_event::events::Hardware::REF_CPU_CYCLES),
         }
     }
 }
@@ -33,9 +36,11 @@ impl crate::Metrics for MetricsProvider {
         <crate::InstantProvider as crate::Metrics>::Start,
         <crate::PerfEventMetric as crate::Metrics>::Start,
         <crate::PerfEventMetric as crate::Metrics>::Start,
+        <crate::PerfEventMetric as crate::Metrics>::Start,
     );
     type Result = (
         <crate::InstantProvider as crate::Metrics>::Result,
+        <crate::PerfEventMetric as crate::Metrics>::Result,
         <crate::PerfEventMetric as crate::Metrics>::Result,
         <crate::PerfEventMetric as crate::Metrics>::Result,
     );
@@ -45,18 +50,25 @@ impl crate::Metrics for MetricsProvider {
             self.wall_time.start(),
             self.task_clock.start(),
             self.instructions.start(),
+            self.cycles.start(),
         )
     }
     fn end(&self, start: Self::Start) -> Self::Result {
         let wall_time = self.wall_time.end(start.0);
         let task_clock = self.task_clock.end(start.1);
         let instructions = self.instructions.end(start.2);
-        (wall_time, task_clock, instructions)
+        let cycles = self.cycles.end(start.3);
+        (wall_time, task_clock, instructions, cycles)
     }
     fn metric_names(&self) -> &[&str] {
-        &["wall_time", "task_clock", "instructions"]
+        &["wall_time", "task_clock", "instructions", "cycles"]
     }
     fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64> {
-        vec![result.0 as f64, result.1 as f64, result.2 as f64]
+        vec![
+            result.0 as f64,
+            result.1 as f64,
+            result.2 as f64,
+            result.3 as f64,
+        ]
     }
 }
