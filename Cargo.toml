@@ -1,0 +1,10 @@
+[package]
+name = "profiler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
+perf-event = "0.4.7"
+thread_local = "1.1"
