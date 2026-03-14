@@ -1,4 +1,5 @@
 use std::{
+    char::MAX,
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     fs::{self, File},
@@ -104,6 +105,7 @@ struct JsonSpanNode {
 const LABEL_W: usize = 34;
 const COL_W: usize = 20;
 const COL_GAP: usize = 5;
+const MAX_TREE_DEPTH: usize = 3;
 
 /// Width of the full table for `n_metrics` columns. Use this when printing
 /// separators outside of `Report::print()` (e.g. in the bench runner).
@@ -285,7 +287,7 @@ impl Report {
         println!("{}", sep);
 
         for (idx, root_key) in self.roots.iter().enumerate() {
-            self.print_node(root_key, "", idx + 1 == self.roots.len(), true, layout);
+            self.print_node(root_key, "", idx + 1 == self.roots.len(), true, 0, layout);
         }
     }
 
@@ -392,6 +394,7 @@ impl Report {
         prefix: &str,
         is_last: bool,
         is_root: bool,
+        depth: usize,
         layout: PrintLayout,
     ) {
         let node = match self.nodes.get(key) {
@@ -418,7 +421,12 @@ impl Report {
         } else {
             node.name.as_str()
         };
-        let label = format!("{}{}{}  ({})", prefix, branch, node_display_name, n_samples);
+        let is_compact = depth >= MAX_TREE_DEPTH;
+        let label = if is_compact {
+            format!("{}  └─{}  ({})", prefix, node_display_name, n_samples)
+        } else {
+            format!("{}{}{}  ({})", prefix, branch, node_display_name, n_samples)
+        };
 
         // Row 1: name(count) and mean ± spread%
         print!(
@@ -431,7 +439,7 @@ impl Report {
             let spread_pct = s.spread() * 100.0;
             let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
             print!(
-                "{:gap$}{:>w$}",
+                "\x1b[1m{:gap$}{:>w$}\x1b[0m",
                 "",
                 cell,
                 gap = layout.col_gap,
@@ -445,8 +453,20 @@ impl Report {
             let detail_tree = if is_root {
                 String::new()
             } else {
-                format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+                let parent_continuation = if is_last { "    " } else { "│   " };
+                if node.children.is_empty() {
+                    let own_continuation = "    ";
+                    format!("{}{}{}", prefix, parent_continuation, own_continuation)
+                } else if depth + 1 >= MAX_TREE_DEPTH {
+                    let child_prefix = if depth < MAX_TREE_DEPTH { "    " } else { "" };
+                    // child is compact add prefix
+                    format!("{} {} ({})=>", prefix, child_prefix, node_display_name)
+                } else {
+                    let own_continuation = "│   ";
+                    format!("{}{}{}", prefix, parent_continuation, own_continuation)
+                }
             };
+            // dbg!(&detail_tree);
             print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
             for s in &stats {
                 let range = format_compact_range(s.min, s.max);
@@ -466,6 +486,8 @@ impl Report {
 
         let next_prefix = if is_root {
             String::new()
+        } else if is_compact {
+            prefix.to_string()
         } else {
             format!("{}{}", prefix, if is_last { "    " } else { "│   " })
         };
@@ -476,6 +498,7 @@ impl Report {
                 &next_prefix,
                 idx + 1 == node.children.len(),
                 false,
+                depth + 1,
                 layout,
             );
         }

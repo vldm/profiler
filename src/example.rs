@@ -33,13 +33,16 @@ fn parse_by_bytes(data: &[u8]) -> Vec<u32> {
 }
 
 #[tracing::instrument(skip_all)]
-fn subprocess(items: &[u32]) -> u64 {
+fn subprocess(items: &[u32], recursion: u32) -> u64 {
+    if recursion != 0 {
+        return subprocess(items, recursion - 1);
+    }
     items.iter().map(|&x| x as u64 * 31).sum()
 }
 
 fn process(items: Vec<u32>) -> u64 {
     let _span = tracing::info_span!("process").entered();
-    subprocess(&items)
+    subprocess(&items, 5)
 }
 
 #[tracing::instrument(skip_all)]
