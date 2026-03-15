@@ -135,11 +135,7 @@ impl<M: Metrics> Report<M> {
         M::Result: Debug,
         M::Start: Debug,
     {
-        let metric_names: Vec<String> = metrics
-            .metric_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
 
         // Phase 1: map span Id → (name, parent_id) from Register entries.
         let mut span_info: HashMap<Id, (String, Option<Id>)> = HashMap::new();
@@ -159,7 +155,6 @@ impl<M: Metrics> Report<M> {
                 ));
             }
         }
-        todo!("Correctly agregate");
 
         // Phase 2: for each Id compute its aggregation key (name path).
         // Cache to avoid repeated traversal.
@@ -190,6 +185,7 @@ impl<M: Metrics> Report<M> {
         for id in span_info.keys().cloned().collect::<Vec<_>>() {
             compute_key(&id, &span_info, &mut key_cache);
         }
+        dbg!(&key_cache);
 
         // Phase 3: aggregate Publish entries by key.
         let mut nodes: HashMap<String, SpanNode> = HashMap::new();

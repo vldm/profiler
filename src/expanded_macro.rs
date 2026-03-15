@@ -1,3 +1,5 @@
+use crate::SingleMetric;
+
 // #[derive(Metrics)]
 pub struct MetricsProvider {
     pub wall_time: crate::InstantProvider,
@@ -33,16 +35,16 @@ const _DERIVE_ASSERT: () = {
 
 impl crate::Metrics for MetricsProvider {
     type Start = (
-        <crate::InstantProvider as crate::Metrics>::Start,
-        <crate::PerfEventMetric as crate::Metrics>::Start,
-        <crate::PerfEventMetric as crate::Metrics>::Start,
-        <crate::PerfEventMetric as crate::Metrics>::Start,
+        <crate::InstantProvider as crate::SingleMetric>::Start,
+        <crate::PerfEventMetric as crate::SingleMetric>::Start,
+        <crate::PerfEventMetric as crate::SingleMetric>::Start,
+        <crate::PerfEventMetric as crate::SingleMetric>::Start,
     );
     type Result = (
-        <crate::InstantProvider as crate::Metrics>::Result,
-        <crate::PerfEventMetric as crate::Metrics>::Result,
-        <crate::PerfEventMetric as crate::Metrics>::Result,
-        <crate::PerfEventMetric as crate::Metrics>::Result,
+        <crate::InstantProvider as crate::SingleMetric>::Result,
+        <crate::PerfEventMetric as crate::SingleMetric>::Result,
+        <crate::PerfEventMetric as crate::SingleMetric>::Result,
+        <crate::PerfEventMetric as crate::SingleMetric>::Result,
     );
 
     fn start(&self) -> Self::Start {
@@ -60,24 +62,26 @@ impl crate::Metrics for MetricsProvider {
         let cycles = self.cycles.end(start.3);
         (wall_time, task_clock, instructions, cycles)
     }
-    fn metric_names(&self) -> &[&str] {
+    fn metrics_names() -> &'static [&'static str] {
         &["wall_time", "task_clock", "instructions", "cycles"]
     }
+
     fn format_value(&self, metric_idx: usize, value: f64) -> (String, &'static str) {
         match metric_idx {
-            0 => self.wall_time.format_value(0, value),
-            1 => self.task_clock.format_value(0, value),
-            2 => self.instructions.format_value(0, value),
-            3 => self.cycles.format_value(0, value),
+            0 => self.wall_time.format_value(value),
+            1 => self.task_clock.format_value(value),
+            2 => self.instructions.format_value(value),
+            3 => self.cycles.format_value(value),
             _ => crate::format_unit_helper(value),
         }
     }
-    fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64> {
-        vec![
-            result.0 as f64,
-            result.1 as f64,
-            result.2 as f64,
-            result.3 as f64,
-        ]
+    fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64 {
+        match metric_idx {
+            0 => self.wall_time.result_to_f64(&result.0),
+            1 => self.task_clock.result_to_f64(&result.1),
+            2 => self.instructions.result_to_f64(&result.2),
+            3 => self.cycles.result_to_f64(&result.3),
+            _ => panic!("Invalid metric index"),
+        }
     }
 }
