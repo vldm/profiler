@@ -137,105 +137,107 @@ impl<M: Metrics> Report<M> {
     {
         let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
 
-        // Phase 1: map span Id → (name, parent_id) from Register entries.
-        let mut span_info: HashMap<Id, (String, Option<Id>)> = HashMap::new();
-        for entry in entries {
-            if let ProfileEntry::Register {
-                id,
-                metadata,
-                parent,
-                ..
-            } = entry
-            {
-                span_info.entry(id.clone()).or_insert((
-                    metadata
-                        .map(|meta| meta.name().to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    parent.clone(),
-                ));
-            }
-        }
-
-        // Phase 2: for each Id compute its aggregation key (name path).
-        // Cache to avoid repeated traversal.
-        let mut key_cache: HashMap<Id, String> = HashMap::new();
         fn compute_key(
             id: &Id,
-            span_info: &HashMap<Id, (String, Option<Id>)>,
-            cache: &mut HashMap<Id, String>,
-        ) -> String {
-            if let Some(cached) = cache.get(id) {
-                return cached.clone();
-            }
+            span_info: &HashMap<Id, (&'static str, Option<Id>)>,
+        ) -> Vec<&'static str> {
             let (name, parent) = match span_info.get(id) {
                 Some(v) => v,
-                None => return "?".to_string(),
+                None => return vec!["?"],
             };
             let key = match parent {
                 Some(pid) => {
-                    let parent_key = compute_key(pid, span_info, cache);
-                    format!("{}/{}", parent_key, name)
+                    let parent_key = compute_key(&pid, span_info);
+                    let mut key = parent_key;
+                    key.push(name);
+                    key
                 }
-                None => name.clone(),
+                None => vec![*name],
             };
-            cache.insert(id.clone(), key.clone());
             key
         }
 
-        for id in span_info.keys().cloned().collect::<Vec<_>>() {
-            compute_key(&id, &span_info, &mut key_cache);
+        // Collect results for each span, underway converting from span id to path.
+        let mut published = Vec::new();
+
+        // list of spans currently "in flight"
+        let mut span_frame: HashMap<Id, (&'static str, Option<Id>)> = HashMap::new();
+        for entry in entries {
+            match entry {
+                // Phase 1: map span Id → (name, parent_id) from Register entries.
+                ProfileEntry::Register {
+                    id,
+                    metadata,
+                    parent,
+                    ..
+                } => {
+                    span_frame.insert(
+                        id.clone(),
+                        (
+                            metadata
+                                .map(|meta| meta.name())
+                                .unwrap_or_else(|| "unknown"),
+                            parent.clone(),
+                        ),
+                    );
+                }
+                // Phase 2: for each Id compute its aggregation key (name path).
+                // Cache to avoid repeated traversal.
+                ProfileEntry::Publish { id, result } => {
+                    let path = compute_key(&id, &span_frame);
+                    published.push((path, result));
+                    // it will be replaced anyway so we can free it early
+                    span_frame.remove(id);
+                }
+            }
         }
-        dbg!(&key_cache);
+
+        fn format_path(path: &[&str]) -> String {
+            path.join("/")
+        }
 
         // Phase 3: aggregate Publish entries by key.
         let mut nodes: HashMap<String, SpanNode> = HashMap::new();
         let mut roots: Vec<String> = Vec::new();
         let mut root_set: HashSet<String> = HashSet::new();
 
-        for entry in entries {
-            if let ProfileEntry::Publish { id, result } = entry {
-                let key = match key_cache.get(id) {
-                    Some(k) => k.clone(),
-                    None => continue,
-                };
-                let (name, _) = match span_info.get(id) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let values = metrics.result_to_f64s(result);
+        for (path, result) in published {
+            let values = metrics.result_to_f64s(result);
 
-                nodes
-                    .entry(key.clone())
-                    .or_insert_with(|| SpanNode {
-                        name: name.clone(),
-                        samples: Vec::new(),
-                        children: Vec::new(),
-                    })
-                    .samples
-                    .push(values);
+            let key = format_path(&path);
+            let name = path.last().unwrap_or(&"?").to_string();
 
-                // Register parent→child relationship.
-                let parts: Vec<&str> = key.rsplitn(2, '/').collect();
-                if parts.len() == 2 {
-                    let parent_key = parts[1].to_string();
-                    let parent_name = parent_key
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(parent_key.as_str())
-                        .to_string();
-                    let pnode = nodes.entry(parent_key.clone()).or_insert_with(|| SpanNode {
-                        name: parent_name,
-                        samples: Vec::new(),
-                        children: Vec::new(),
-                    });
-                    if !pnode.children.contains(&key) {
-                        pnode.children.push(key.clone());
-                    }
-                } else {
-                    // This is a root.
-                    if root_set.insert(key.clone()) {
-                        roots.push(key.clone());
-                    }
+            nodes
+                .entry(key.clone())
+                .or_insert_with(|| SpanNode {
+                    name: name.clone(),
+                    samples: Vec::new(),
+                    children: Vec::new(),
+                })
+                .samples
+                .push(values);
+
+            // Register parent→child relationship.
+            let parts: Vec<&str> = key.rsplitn(2, '/').collect();
+            if parts.len() == 2 {
+                let parent_key = parts[1].to_string();
+                let parent_name = parent_key
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(parent_key.as_str())
+                    .to_string();
+                let pnode = nodes.entry(parent_key.clone()).or_insert_with(|| SpanNode {
+                    name: parent_name,
+                    samples: Vec::new(),
+                    children: Vec::new(),
+                });
+                if !pnode.children.contains(&key) {
+                    pnode.children.push(key.clone());
+                }
+            } else {
+                // This is a root.
+                if root_set.insert(key.clone()) {
+                    roots.push(key.clone());
                 }
             }
         }
@@ -451,13 +453,21 @@ impl<M: Metrics> Report<M> {
                 String::new()
             } else {
                 let parent_continuation = if is_last { "    " } else { "│   " };
-                if node.children.is_empty() {
+
+                let child_compact = depth + 1 >= MAX_TREE_DEPTH;
+                let neigbour_copact: bool = is_compact && !is_last;
+                if neigbour_copact || child_compact {
+                    // child is compact - add prefix
+                    let child_prefix = if depth < MAX_TREE_DEPTH { "    " } else { "" };
+                    let num_parents = key.matches('/').count();
+                    // child is compact add prefix
+                    format!(
+                        "{} {} <=={}({})",
+                        prefix, child_prefix, num_parents, node_display_name
+                    )
+                } else if node.children.is_empty() {
                     let own_continuation = "    ";
                     format!("{}{}{}", prefix, parent_continuation, own_continuation)
-                } else if depth + 1 >= MAX_TREE_DEPTH {
-                    let child_prefix = if depth < MAX_TREE_DEPTH { "    " } else { "" };
-                    // child is compact add prefix
-                    format!("{} {} ({})=>", prefix, child_prefix, node_display_name)
                 } else {
                     let own_continuation = "│   ";
                     format!("{}{}{}", prefix, parent_continuation, own_continuation)

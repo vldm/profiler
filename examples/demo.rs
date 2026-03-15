@@ -6,6 +6,8 @@
 //
 // Run with: cargo run --example basic
 
+use std::time::Duration;
+
 use profiler::bench::Bencher;
 use profiler::expanded_macro::MetricsProvider;
 
@@ -32,17 +34,25 @@ fn parse_by_bytes(data: &[u8]) -> Vec<u32> {
     result
 }
 
+fn other_fn() {
+    let _span = tracing::info_span!("other_fn").entered();
+}
+
 #[tracing::instrument(skip_all)]
-fn subprocess(items: &[u32], recursion: u32) -> u64 {
-    if recursion != 0 {
-        return subprocess(items, recursion - 1);
+fn subprocess(items: &[u32], recursion: u64) -> u64 {
+    if recursion == 0 {
+        return items.iter().map(|&x| x as u64).sum();
     }
-    items.iter().map(|&x| x as u64 * 31).sum()
+    if recursion % 2 == 0 {
+        // call additional fn to create more spans for test
+        other_fn();
+    }
+    subprocess(&items, recursion - 1)
 }
 
 fn process(items: Vec<u32>) -> u64 {
     let _span = tracing::info_span!("process").entered();
-    subprocess(&items, 1)
+    subprocess(&items, 5)
 }
 
 #[tracing::instrument(skip_all)]
@@ -69,7 +79,10 @@ fn bench_parse(bencher: &mut Bencher) {
     let group = bencher.group("parsing");
 
     let data_clone = data.clone();
-    group.name("chunks").run(move || parse(&data_clone));
+    group.name("chunks").run(move || {
+        parse(&data_clone);
+        pipeline(&data_clone);
+    });
 
     let data_clone = data.clone();
     group
@@ -83,7 +96,7 @@ fn main() {
     use profiler::bench::*;
 
     let mut runner = BenchRunner::<MetricsProvider>::new();
-    runner.register(WrapFn(bench_pipeline).parse("bench_pipeline"));
+    // runner.register(WrapFn(bench_pipeline).parse("bench_pipeline"));
     runner.register(WrapFn(bench_parse).parse("bench_parse"));
 
     runner.run_all();
