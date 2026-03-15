@@ -52,9 +52,8 @@ impl Bencher {
             name: name.into(),
             current_config: BenchConfig {
                 warmup_seconds: 3,
-                // test
-                num_iters: 1,
-                min_run_time: Duration::from_nanos(1),
+                num_iters: 1000,
+                min_run_time: Duration::from_secs(3),
                 group_name: None,
             },
             iter_fn: Vec::new(),
@@ -165,7 +164,7 @@ where
         self.benchmarks
             .sort_by(|a, b| (&a.config.group_name, &a.name).cmp(&(&b.config.group_name, &b.name)));
 
-        let mut reports: Vec<Report> = Vec::new();
+        let mut reports: Vec<Report<M>> = Vec::new();
 
         for NamedBench { name, func, config } in &mut self.benchmarks {
             // Phase 1: Warmup — collector NOT installed as subscriber.
@@ -195,7 +194,7 @@ where
             let metrics = self.collector.metrics();
             let report = Report::from_profile_entries(
                 &entries,
-                metrics.as_ref(),
+                Arc::clone(metrics),
                 config.group_name.clone(),
                 name.clone(),
             );

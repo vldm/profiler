@@ -1,18 +1,16 @@
 use std::{
-    char::MAX,
     collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     fs::{self, File},
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::Serialize;
 use tracing::Id;
 
 use crate::{Metrics, ProfileEntry};
-
-// ── Aggregated span node ───────────────────────────────────────
 
 /// One node in the aggregated span tree, keyed by (name, parent_key).
 struct SpanNode {
@@ -75,7 +73,8 @@ impl MetricStats {
 
 // ── Report ─────────────────────────────────────────────────────
 
-pub struct Report {
+pub struct Report<M: Metrics> {
+    metrics: Arc<M>,
     group_name: Option<String>,
     bench_name: String,
     metric_names: Vec<String>,
@@ -120,15 +119,15 @@ struct PrintLayout {
     col_gap: usize,
 }
 
-impl Report {
+impl<M: Metrics> Report<M> {
     /// Build a report from raw `ProfileEntry` events produced by the Collector.
     ///
     /// Entries with the same span name under the same parent name are merged
     /// into a single node, so 100 iterations of `iter → parse → process`
     /// become one tree with 100 samples per node.
-    pub fn from_profile_entries<M: Metrics>(
+    pub fn from_profile_entries(
         entries: &[ProfileEntry<M::Start, M::Result>],
-        metrics: &M,
+        metrics: Arc<M>,
         group_name: Option<String>,
         bench_name: String,
     ) -> Self
@@ -160,6 +159,7 @@ impl Report {
                 ));
             }
         }
+        todo!("Correctly agregate");
 
         // Phase 2: for each Id compute its aggregation key (name path).
         // Cache to avoid repeated traversal.
@@ -250,6 +250,7 @@ impl Report {
         }
 
         Self {
+            metrics,
             group_name,
             bench_name,
             metric_names,
@@ -434,8 +435,8 @@ impl Report {
             label,
             label_w = layout.label_w
         );
-        for s in &stats {
-            let (val, unit) = format_auto(s.mean);
+        for (metric_idx, s) in stats.iter().enumerate() {
+            let (val, unit) = self.metrics.format_value(metric_idx, s.mean);
             let spread_pct = s.spread() * 100.0;
             let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
             print!(
@@ -468,8 +469,8 @@ impl Report {
             };
             // dbg!(&detail_tree);
             print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
-            for s in &stats {
-                let range = format_compact_range(s.min, s.max);
+            for (metric_idx, s) in stats.iter().enumerate() {
+                let range = self.format_compact_range(metric_idx, s.min, s.max);
                 let cell = format!("\x1b[2m{}\x1b[0m", range);
                 let padding = layout.col_w.saturating_sub(range.len());
                 print!(
@@ -517,6 +518,21 @@ impl Report {
             })
             .collect()
     }
+
+    fn format_compact_range(&self, metric_idx: usize, min: f64, max: f64) -> String {
+        let (lo, u1) = self.metrics.format_value(metric_idx, min);
+        let (hi, u2) = self.metrics.format_value(metric_idx, max);
+
+        if u1 == u2 {
+            if u1.is_empty() {
+                format!("[{} .. {}]", lo, hi)
+            } else {
+                format!("[{} .. {}{}]", lo, hi, u1)
+            }
+        } else {
+            format!("[{}{} .. {}{}]", lo, u1, hi, u2)
+        }
+    }
 }
 
 // ── Formatting helpers ─────────────────────────────────────────
@@ -533,34 +549,5 @@ fn sanitize_path_segment(value: &str) -> String {
         "unnamed".to_string()
     } else {
         sanitized
-    }
-}
-
-fn format_auto(value: f64) -> (String, &'static str) {
-    if value >= 1_000_000_000.0 {
-        (format!("{:.3}", value / 1_000_000_000.0), "s")
-    } else if value >= 1_000_000.0 {
-        (format!("{:.3}", value / 1_000_000.0), "ms")
-    } else if value >= 1_000.0 {
-        (format!("{:.2}", value / 1_000.0), "K")
-    } else if value >= 1.0 {
-        (format!("{:.1}", value), "")
-    } else {
-        (format!("{:.3}", value), "")
-    }
-}
-
-fn format_compact_range(min: f64, max: f64) -> String {
-    let (lo, u1) = format_auto(min);
-    let (hi, u2) = format_auto(max);
-
-    if u1 == u2 {
-        if u1.is_empty() {
-            format!("[{} .. {}]", lo, hi)
-        } else {
-            format!("[{} .. {}{}]", lo, hi, u1)
-        }
-    } else {
-        format!("[{}{} .. {}{}]", lo, u1, hi, u2)
     }
 }

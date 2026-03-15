@@ -63,6 +63,15 @@ impl crate::Metrics for MetricsProvider {
     fn metric_names(&self) -> &[&str] {
         &["wall_time", "task_clock", "instructions", "cycles"]
     }
+    fn format_value(&self, metric_idx: usize, value: f64) -> (String, &'static str) {
+        match metric_idx {
+            0 => self.wall_time.format_value(0, value),
+            1 => self.task_clock.format_value(0, value),
+            2 => self.instructions.format_value(0, value),
+            3 => self.cycles.format_value(0, value),
+            _ => crate::format_unit_helper(value),
+        }
+    }
     fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64> {
         vec![
             result.0 as f64,

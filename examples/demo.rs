@@ -42,7 +42,7 @@ fn subprocess(items: &[u32], recursion: u32) -> u64 {
 
 fn process(items: Vec<u32>) -> u64 {
     let _span = tracing::info_span!("process").entered();
-    subprocess(&items, 5)
+    subprocess(&items, 1)
 }
 
 #[tracing::instrument(skip_all)]

@@ -12,8 +12,6 @@ mod bench_helper;
 pub mod expanded_macro;
 pub mod report;
 
-// ── Metrics trait ──────────────────────────────────────────────
-
 pub trait Metrics: Send + Sync + 'static {
     type Start: Clone + Send + 'static;
     type Result: Clone + Send + 'static;
@@ -27,13 +25,14 @@ pub trait Metrics: Send + Sync + 'static {
     fn start(&self) -> Self::Start;
     fn end(&self, start: Self::Start) -> Self::Result;
 
+    fn format_value(&self, _metric_idx: usize, value: f64) -> (String, &'static str) {
+        format_unit_helper(value)
+    }
     /// Names of individual metrics produced by this provider.
     fn metric_names(&self) -> &[&str];
     /// Convert a result snapshot into f64 values (same order as `metric_names`).
     fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64>;
 }
-
-// ── ProfileEntry ───────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum ProfileEntry<Start, Result> {
@@ -47,8 +46,6 @@ pub enum ProfileEntry<Start, Result> {
     /// Span exited — captures measured result.
     Publish { id: Id, result: Result },
 }
-
-// ── Collector ──────────────────────────────────────────────────
 
 struct CollectorInner<M: Metrics> {
     span_start_state: HashMap<Id, M::Start>,
@@ -201,10 +198,35 @@ impl Metrics for InstantProvider {
     fn end(&self, start: Self::Start) -> Self::Result {
         start.elapsed().as_nanos() as u64
     }
+    fn format_value(&self, _metric_idx: usize, value: f64) -> (String, &'static str) {
+        if value >= 60_000_000.0 {
+            (format!("{:.3}", value / 60_000_000.0), "min")
+        } else if value >= 1_000_000.0 {
+            (format!("{:.3}", value / 1_000_000.0), "s")
+        } else if value >= 1_000.0 {
+            (format!("{:.2}", value / 1_000.0), "ms")
+        } else {
+            (format!("{:.1}", value), "ns")
+        }
+    }
     fn metric_names(&self) -> &[&str] {
         &["duration_ns"]
     }
     fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64> {
         vec![*result as f64]
+    }
+}
+
+pub fn format_unit_helper(value: f64) -> (String, &'static str) {
+    if value >= 1_000_000_000.0 {
+        (format!("{:.3}", value / 1_000_000_000.0), "G")
+    } else if value >= 1_000_000.0 {
+        (format!("{:.3}", value / 1_000_000.0), "M")
+    } else if value >= 1_000.0 {
+        (format!("{:.3}", value / 1_000.0), "K")
+    } else if value >= 1.0 {
+        (format!("{:.2}", value), "")
+    } else {
+        (format!("{:.3}", value), "")
     }
 }
