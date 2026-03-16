@@ -492,7 +492,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
                 let (val, unit) = self.report.data.metrics.format_value(metric_idx, b.median);
                 let spread_pct = b.spread() * 100.0;
-                let cell = format!("b: {}{} ± {:.0}%", val, unit, spread_pct);
+                let cell = format!("baseline: {}{} ± {:.0}%", val, unit, spread_pct);
                 print!(
                     "\x1b[1m{:gap$}{:>w$}\x1b[0m",
                     "",

@@ -64,7 +64,7 @@ impl Bencher {
             name: name.into(),
             current_config: BenchConfig {
                 warmup_seconds: 3,
-                num_iters: 1000,
+                num_iters: 300,
                 min_run_time: Duration::from_secs(3),
                 group_name: None,
             },
@@ -90,6 +90,8 @@ impl Bencher {
     }
     /// Set minimum number of iterations for the measured phase.
     /// The runner may increase iterations count if the total run time is below `min_run_time`.
+    ///
+    /// The one can set it to 1 or 0 to enforce stop by time only.
     pub fn num_iters(&mut self, iters: usize) -> &mut Self {
         self.current_config.num_iters = iters;
         self

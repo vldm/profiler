@@ -6,7 +6,7 @@
 //
 // Run with: cargo run --example demo
 
-use std::{thread::sleep, time::Duration};
+use std::thread::sleep;
 
 use profiler::bench::Bencher;
 
@@ -42,7 +42,6 @@ fn subprocess(items: &[u32], recursion: u64) -> u64 {
 }
 
 fn process(items: Vec<u32>) -> u64 {
-    sleep(Duration::from_millis(100));
     let _span = tracing::info_span!("process").entered();
     subprocess(&items, 3)
 }
@@ -53,7 +52,6 @@ fn serialize(result: u64) -> Vec<u8> {
 }
 
 fn pipeline(data: &[u8]) -> Vec<u8> {
-    sleep(Duration::from_millis(100));
     serialize(process(parse(data)))
 }
 
@@ -74,7 +72,6 @@ fn bench_parse(bencher: &mut Bencher) {
     let data_clone = data.clone();
     group.name("chunks").run(move || {
         parse(&data_clone);
-        pipeline(&data_clone);
     });
 
     let data_clone = data.clone();

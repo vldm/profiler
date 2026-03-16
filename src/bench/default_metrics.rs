@@ -2,9 +2,9 @@ use profiler_macros::Metrics;
 
 #[derive(Metrics)]
 pub struct MetricsProvider {
-    // uses default impl
-    pub wall_time: crate::InstantProvider,
-
+    /// Time spent on CPU for specific thread.
+    /// On short intervals can report more than cpu-time/wall-time.
+    /// But gives a good estimate on real CPU time spent in kernel/user mode.
     #[new(perf_event::events::Software::TASK_CLOCK)]
     pub task_clock: crate::PerfEventMetric,
 
@@ -14,9 +14,13 @@ pub struct MetricsProvider {
     #[new(perf_event::events::Hardware::REF_CPU_CYCLES)]
     pub cycles: crate::PerfEventMetric,
 
-    #[new(crate::RusageKind::SystemTime, true)]
-    pub system_time: crate::RusageMetric,
+    /// Without `#[new]` attribute, the metric will be initialized with `Default::default()`.
+    /// wall_time can be gathered from Instant or from perf_event(CPU_CLOCK), result is similar,
+    /// but Instant is more portable.
+    pub wall_time: crate::InstantProvider,
 
+    /// `libc::getrusage` based metrics, is not better source for metrics in scenario of short intervals,
+    /// but still good metric for debugging time spent in kernel/user mode.
     #[new(crate::RusageKind::UserTime, true)]
-    pub user_time: crate::RusageMetric,
+    pub user_mode_time: crate::RusageMetric,
 }

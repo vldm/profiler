@@ -109,6 +109,20 @@ impl SingleMetric for PerfEventMetric {
     fn result_to_f64(&self, result: &Self::Result) -> f64 {
         *result as f64
     }
+    fn format_value(&self, value: f64) -> (String, &'static str) {
+        match self.kind {
+            perf_event::events::Event::Software(
+                perf_event::events::Software::CPU_CLOCK | perf_event::events::Software::TASK_CLOCK,
+            ) => {
+                // format time metrics in human-readable way.
+                InstantProvider.format_value(value)
+            }
+            _ => {
+                // for other metrics just format with unit suffixes.
+                format_unit_helper(value)
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -116,21 +130,23 @@ pub struct InstantProvider;
 
 impl SingleMetric for InstantProvider {
     type Start = Instant;
-    type Result = u64; // duration in nanoseconds
+    type Result = u128; // duration in nanoseconds
 
     fn start(&self) -> Self::Start {
         Instant::now()
     }
     fn end(&self, start: Self::Start) -> Self::Result {
-        start.elapsed().as_nanos() as u64
+        start.elapsed().as_nanos()
     }
     fn format_value(&self, value: f64) -> (String, &'static str) {
-        if value >= 60_000_000.0 {
-            (format!("{:.3}", value / 60_000_000.0), "min")
+        if value >= 60_000_000_000.0 {
+            (format!("{:.3}", value / 60_000_000_000.0), "min")
+        } else if value >= 1_000_000_000.0 {
+            (format!("{:.3}", value / 1_000_000_000.0), "s")
         } else if value >= 1_000_000.0 {
-            (format!("{:.3}", value / 1_000_000.0), "s")
+            (format!("{:.3}", value / 1_000_000.0), "ms")
         } else if value >= 1_000.0 {
-            (format!("{:.2}", value / 1_000.0), "ms")
+            (format!("{:.2}", value / 1_000.0), "us")
         } else {
             (format!("{:.1}", value), "ns")
         }
@@ -159,7 +175,7 @@ mod rusage {
 
     use thread_local::ThreadLocal;
 
-    use crate::{InstantProvider, SingleMetric};
+    use crate::{InstantProvider, SingleMetric, format_unit_helper};
 
     #[derive(Clone, Copy, Debug)]
     pub enum RusageKind {
@@ -278,7 +294,16 @@ mod rusage {
             *result as f64
         }
         fn format_value(&self, value: f64) -> (String, &'static str) {
-            InstantProvider.format_value(value)
+            match self.kind {
+                RusageKind::UserTime | RusageKind::SystemTime => {
+                    // format time metrics in human-readable way.
+                    InstantProvider.format_value(value)
+                }
+                _ => {
+                    // for other metrics just format with unit suffixes.
+                    format_unit_helper(value)
+                }
+            }
         }
     }
 }
