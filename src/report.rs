@@ -145,7 +145,7 @@ impl<M: Metrics> Report<M> {
                 Some(v) => v,
                 None => return vec!["?"],
             };
-            let key = match parent {
+            match parent {
                 Some(pid) => {
                     let parent_key = compute_key(&pid, span_info);
                     let mut key = parent_key;
@@ -153,8 +153,7 @@ impl<M: Metrics> Report<M> {
                     key
                 }
                 None => vec![*name],
-            };
-            key
+            }
         }
 
         // Collect results for each span, underway converting from span id to path.
@@ -174,9 +173,7 @@ impl<M: Metrics> Report<M> {
                     span_frame.insert(
                         id.clone(),
                         (
-                            metadata
-                                .map(|meta| meta.name())
-                                .unwrap_or_else(|| "unknown"),
+                            metadata.map(|meta| meta.name()).unwrap_or("unknown"),
                             parent.clone(),
                         ),
                     );
@@ -191,6 +188,7 @@ impl<M: Metrics> Report<M> {
                 }
             }
         }
+        dbg!(&published);
 
         fn format_path(path: &[&str]) -> String {
             path.join("/")

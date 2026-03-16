@@ -139,8 +139,7 @@ where
     M::Start: Debug,
 {
     pub fn new() -> Self {
-        let metrics = Arc::new(M::default());
-        let collector = Collector::new_buffered(metrics);
+        let collector = Collector::new_buffered(Arc::new(M::default()));
         Self {
             collector,
             benchmarks: Vec::new(),
