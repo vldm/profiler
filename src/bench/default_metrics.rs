@@ -20,5 +20,3 @@ pub struct MetricsProvider {
     #[new(crate::RusageKind::UserTime, true)]
     pub user_time: crate::RusageMetric,
 }
-
-pub type ProfilerCollector = crate::Collector<MetricsProvider>;

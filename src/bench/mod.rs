@@ -5,9 +5,15 @@ use std::time::Duration;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
-pub use crate::bench_helper::{BenchFn, WrapFn};
-use crate::report::Report;
+use self::report::Report;
 use crate::{Collector, Metrics};
+
+mod default_metrics;
+mod helpers;
+pub mod report;
+pub use default_metrics::MetricsProvider;
+
+pub use self::helpers::{BenchFn, BenchFnSpec};
 pub use std::hint::black_box;
 
 /// Helper handler that allows separating `setup` and `measured` phases of a benchmark.
@@ -91,7 +97,7 @@ impl Bencher {
     }
 
     /// Defines run fn of a benchmark.
-    pub fn run<R>(&mut self, mut f: impl FnMut() -> R + 'static) {
+    pub fn run<R>(&mut self, mut f: impl FnMut() -> R + 'static + Send) {
         assert_ne!(
             self.iter_fn.last().map(|v| v.name.as_str()),
             Some(self.name.as_str()),
@@ -113,7 +119,7 @@ impl Bencher {
 pub struct NamedBench {
     name: String,
     config: BenchConfig,
-    func: Box<dyn FnMut(Span)>,
+    func: Box<dyn FnMut(Span) + Send>,
 }
 impl Debug for NamedBench {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,7 +134,7 @@ impl Debug for NamedBench {
 ///
 /// Creates a single [`Collector<M>`]. Each `Bencher::run()` installs it as
 /// the tracing subscriber only during the measured phase (not during warmup).
-pub struct BenchRunner<M: Metrics + Default> {
+pub struct BenchRunner<M: Metrics + Default = MetricsProvider> {
     collector: Collector<M>,
     benchmarks: Vec<NamedBench>,
 }
@@ -157,7 +163,7 @@ where
     }
 
     /// Run all registered benchmarks and display the report.
-    pub fn run_all(mut self) {
+    pub fn start(mut self) {
         use tracing_subscriber::layer::SubscriberExt;
 
         self.benchmarks

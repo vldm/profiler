@@ -1,27 +1,27 @@
 use crate::bench::{Bencher, NamedBench};
 
 /// Helper type to implement BenchFn for both `Fn() -> Any` and `Fn(&mut Bench)`.
-pub struct WrapFn<T: ?Sized>(pub T);
-pub trait BenchFn {
-    fn parse(self, name: &'static str) -> Vec<NamedBench>;
+pub struct BenchFn<T: ?Sized>(pub T);
+pub trait BenchFnSpec {
+    fn register_with_name(self, name: &'static str) -> Vec<NamedBench>;
 }
 
-impl<F, Any> BenchFn for WrapFn<F>
+impl<F, Any> BenchFnSpec for BenchFn<F>
 where
-    F: Fn() -> Any + 'static,
+    F: Fn() -> Any + Send + 'static,
 {
-    fn parse(self, name: &'static str) -> Vec<NamedBench> {
+    fn register_with_name(self, name: &'static str) -> Vec<NamedBench> {
         let mut bench = Bencher::new(name);
         bench.run(move || (self.0)());
         bench.take_benches()
     }
 }
 
-impl<F> BenchFn for &WrapFn<F>
+impl<F> BenchFnSpec for &BenchFn<F>
 where
     F: Fn(&mut Bencher),
 {
-    fn parse(self, name: &'static str) -> Vec<NamedBench> {
+    fn register_with_name(self, name: &'static str) -> Vec<NamedBench> {
         let mut bench = Bencher::new(name);
         (self.0)(&mut bench);
         bench.take_benches()

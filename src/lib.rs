@@ -9,10 +9,7 @@ pub use crate::metrics::{
     format_unit_helper,
 };
 pub mod bench;
-mod bench_helper;
-pub mod expanded_macro;
 pub mod metrics;
-pub mod report;
 
 #[derive(Debug)]
 pub enum ProfileEntry<Start, Result> {

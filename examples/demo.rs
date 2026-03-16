@@ -6,11 +6,9 @@
 //
 // Run with: cargo run --example basic
 
-use std::thread::sleep;
 use std::time::Duration;
 
 use profiler::bench::Bencher;
-use profiler::expanded_macro::MetricsProvider;
 
 // --- Application code under test ---
 
@@ -95,13 +93,12 @@ fn bench_parse(bencher: &mut Bencher) {
 }
 
 // --- Entry point ---
-
 fn main() {
     use profiler::bench::*;
 
     let mut runner = BenchRunner::<MetricsProvider>::new();
-    runner.register(WrapFn(bench_pipeline).parse("bench_pipeline"));
-    runner.register(WrapFn(bench_parse).parse("bench_parse"));
+    runner.register(BenchFn(bench_pipeline).register_with_name("bench_pipeline"));
+    runner.register(BenchFn(bench_parse).register_with_name("bench_parse"));
 
-    runner.run_all();
+    runner.start();
 }
