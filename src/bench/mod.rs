@@ -196,12 +196,31 @@ where
     }
 
     /// Register a benchmark function that receives `&mut Bencher<M>`.
+    pub fn with_bencher(&mut self, name: &str, func: impl FnOnce(&mut Bencher)) {
+        let mut bencher = Bencher::new(name);
+        func(&mut bencher);
+        self.register(bencher.take_benches());
+    }
+
+    /// Register a benchmark function that receives `&mut Bencher<M>`.
     pub fn register(&mut self, named_bench: Vec<NamedBench>) {
         self.benchmarks.extend(named_bench);
     }
 
     /// Run all registered benchmarks and display the report.
-    pub fn start(mut self)
+    pub fn start(self)
+    where
+        M::Result: serde::Serialize,
+    {
+        std::thread::spawn(move || {
+            #[cfg(feature = "libc")]
+            pin_current_thread().unwrap();
+            self.start_inner()
+        })
+        .join()
+        .unwrap();
+    }
+    fn start_inner(mut self)
     where
         M::Result: serde::Serialize,
     {
@@ -266,32 +285,22 @@ where
     }
 }
 
-// fn run_inner<R>(&mut self, name: &str, mut f: impl FnMut() -> R) {
-//     use tracing_subscriber::layer::SubscriberExt;
+#[cfg(feature = "libc")]
+pub fn pin_current_thread() -> std::io::Result<()> {
+    unsafe {
+        let cpus = num_cpus::get();
+        let cpu = (cpus + 2) % cpus; // third cpu if there are more than 2, otherwise the same cpu
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        libc::CPU_SET(cpu, &mut set);
 
-//     // Phase 1: Warmup — collector NOT installed as subscriber.
-//     // (No tracing overhead, no stale entries.)
-//     let subscriber = tracing_subscriber::registry().with(self.collector.clone());
-//     let _guard = tracing::subscriber::set_default(subscriber);
-//     {
-//         for _ in 0..self.warmup_seconds {
-//             std::hint::black_box(f());
-//         }
-//     }
-
-//     // Phase 2: Measured — install collector for the measurement window.
-//     {
-//         let start = std::time::Instant::now();
-//         for iter in 0.. {
-//             let _span = tracing::info_span!(target: "profiler", "bench", name = name).entered();
-
-//             std::hint::black_box(f());
-//             if iter >= self.num_iters && start.elapsed() >= self.min_run_time {
-//                 break;
-//             }
-//         }
-//     }
-// }
+        let ret = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 
 impl<M: Metrics + Default> Default for BenchRunner<M>
 where

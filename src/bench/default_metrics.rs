@@ -2,6 +2,11 @@ use profiler_macros::Metrics;
 
 #[derive(Metrics)]
 pub struct MetricsProvider {
+    /// CPU cycles spent in the span.
+    /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
+    #[new(perf_event::events::Hardware::REF_CPU_CYCLES)]
+    pub cycles: crate::PerfEventMetric,
+
     /// Time spent on CPU for specific thread.
     /// On short intervals can report more than cpu-time/wall-time.
     /// But gives a good estimate on real CPU time spent in kernel/user mode.
@@ -10,9 +15,6 @@ pub struct MetricsProvider {
 
     #[new(perf_event::events::Hardware::INSTRUCTIONS)]
     pub instructions: crate::PerfEventMetric,
-
-    #[new(perf_event::events::Hardware::REF_CPU_CYCLES)]
-    pub cycles: crate::PerfEventMetric,
 
     /// Without `#[new]` attribute, the metric will be initialized with `Default::default()`.
     /// wall_time can be gathered from Instant or from perf_event(CPU_CLOCK), result is similar,

@@ -6,8 +6,6 @@
 //
 // Run with: cargo run --example demo
 
-use std::thread::sleep;
-
 use profiler::bench::Bencher;
 
 // --- Application code under test ---
@@ -38,7 +36,7 @@ fn subprocess(items: &[u32], recursion: u64) -> u64 {
     if recursion == 0 {
         return items.iter().map(|&x| x as u64).sum();
     }
-    subprocess(&items, recursion - 1)
+    subprocess(items, recursion - 1)
 }
 
 fn process(items: Vec<u32>) -> u64 {

@@ -144,7 +144,7 @@ impl<M: Metrics> AnalyzedReport<M> {
             };
             match parent {
                 Some(pid) => {
-                    let parent_key = compute_key(&pid, span_info);
+                    let parent_key = compute_key(pid, span_info);
                     let mut key = parent_key;
                     key.push(name);
                     key
@@ -178,7 +178,7 @@ impl<M: Metrics> AnalyzedReport<M> {
                 // Phase 2: for each Id compute its aggregation key (name path).
                 // Cache to avoid repeated traversal.
                 ProfileEntry::Publish { id, result } => {
-                    let path = compute_key(&id, &span_frame);
+                    let path = compute_key(id, &span_frame);
                     let owned_path: Vec<String> = path.into_iter().map(|s| s.to_string()).collect();
                     published.push((owned_path, result.clone()));
                     // it will be replaced anyway so we can free it early
@@ -200,10 +200,7 @@ impl<M: Metrics> AnalyzedReport<M> {
             let values = metrics.result_to_f64s(result);
 
             let key = format_path(path);
-            let name = path
-                .last()
-                .map(|s| s.clone())
-                .unwrap_or_else(|| "?".to_string());
+            let name = path.last().cloned().unwrap_or_else(|| "?".to_string());
 
             nodes
                 .entry(key.clone())
@@ -258,11 +255,7 @@ impl<M: Metrics> AnalyzedReport<M> {
         }
     }
 
-    fn format_path(
-        group_name: &Option<String>,
-        bench_name: &String,
-        json_file: JsonFile,
-    ) -> PathBuf {
+    fn format_path(group_name: &Option<String>, bench_name: &str, json_file: JsonFile) -> PathBuf {
         let mut path = cargo_target_directory()
             .unwrap_or_else(|| PathBuf::from("target"))
             .join("profiler");

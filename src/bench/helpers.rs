@@ -1,3 +1,5 @@
+use crate::black_box;
+
 use crate::bench::{Bencher, NamedBench};
 
 /// Helper type to implement BenchFn for both `Fn() -> Any` and `Fn(&mut Bench)`.
@@ -12,7 +14,7 @@ where
 {
     fn register_with_name(self, name: &'static str) -> Vec<NamedBench> {
         let mut bench = Bencher::new(name);
-        bench.run(move || (self.0)());
+        bench.run(move || black_box(&self.0)());
         bench.take_benches()
     }
 }
