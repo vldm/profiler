@@ -1,7 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt::Debug,
-    fs::{self, File},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,11 +12,13 @@ use tracing::Id;
 use crate::{Metrics, ProfileEntry};
 
 /// One node in the aggregated span tree, keyed by (name, parent_key).
-struct SpanNode {
-    name: String,
+pub mod json;
+
+pub struct SpanNode {
+    pub name: String,
     /// `samples[i][j]` = value of metric `j` in sample `i`.
-    samples: Vec<Vec<f64>>,
-    children: Vec<String>, // child keys (ordered, deduplicated)
+    pub samples: Vec<Vec<f64>>,
+    pub children: Vec<String>, // child keys (ordered, deduplicated)
 }
 
 /// Statistics for one metric across samples.
@@ -31,7 +32,7 @@ pub struct MetricStats {
 }
 
 impl MetricStats {
-    fn from_values(values: &[f64]) -> Self {
+    pub fn from_values(values: &[f64]) -> Self {
         if values.is_empty() {
             return Self::default();
         }
@@ -73,32 +74,18 @@ impl MetricStats {
 
 // ── Report ─────────────────────────────────────────────────────
 
-pub struct Report<M: Metrics> {
-    metrics: Arc<M>,
-    group_name: Option<String>,
-    bench_name: String,
-    metric_names: Vec<String>,
-    /// Aggregated nodes keyed by path string ("root/child/grandchild").
-    nodes: HashMap<String, SpanNode>,
-    /// Root keys in insertion order.
-    roots: Vec<String>,
+pub struct RawData<M: Metrics> {
+    pub metrics: Arc<M>,
+    pub group_name: Option<String>,
+    pub bench_name: String,
+    pub published: Vec<(Vec<String>, M::Result)>,
 }
 
-#[derive(Serialize)]
-struct JsonReport {
-    schema_version: u32,
-    group: Option<String>,
-    name: String,
-    metric_names: Vec<String>,
-    roots: Vec<JsonSpanNode>,
-}
-
-#[derive(Serialize)]
-struct JsonSpanNode {
-    name: String,
-    samples: usize,
-    metrics: BTreeMap<String, MetricStats>,
-    children: Vec<JsonSpanNode>,
+pub struct AnalyzedReport<M: Metrics> {
+    pub data: RawData<M>,
+    pub metric_names: Vec<String>,
+    pub nodes: HashMap<String, SpanNode>,
+    pub roots: Vec<String>,
 }
 
 const LABEL_W: usize = 34;
@@ -118,7 +105,7 @@ struct PrintLayout {
     col_gap: usize,
 }
 
-impl<M: Metrics> Report<M> {
+impl<M: Metrics> AnalyzedReport<M> {
     /// Build a report from raw `ProfileEntry` events produced by the Collector.
     ///
     /// Entries with the same span name under the same parent name are merged
@@ -181,14 +168,15 @@ impl<M: Metrics> Report<M> {
                 // Cache to avoid repeated traversal.
                 ProfileEntry::Publish { id, result } => {
                     let path = compute_key(&id, &span_frame);
-                    published.push((path, result));
+                    let owned_path: Vec<String> = path.into_iter().map(|s| s.to_string()).collect();
+                    published.push((owned_path, result.clone()));
                     // it will be replaced anyway so we can free it early
                     span_frame.remove(id);
                 }
             }
         }
 
-        fn format_path(path: &[&str]) -> String {
+        fn format_path(path: &[String]) -> String {
             path.join("/")
         }
 
@@ -197,11 +185,14 @@ impl<M: Metrics> Report<M> {
         let mut roots: Vec<String> = Vec::new();
         let mut root_set: HashSet<String> = HashSet::new();
 
-        for (path, result) in published {
+        for (path, result) in &published {
             let values = metrics.result_to_f64s(result);
 
-            let key = format_path(&path);
-            let name = path.last().unwrap_or(&"?").to_string();
+            let key = format_path(path);
+            let name = path
+                .last()
+                .map(|s| s.clone())
+                .unwrap_or_else(|| "?".to_string());
 
             nodes
                 .entry(key.clone())
@@ -244,22 +235,64 @@ impl<M: Metrics> Report<M> {
         }
 
         Self {
-            metrics,
-            group_name,
-            bench_name,
+            data: RawData {
+                metrics,
+                group_name,
+                bench_name,
+                published,
+            },
             metric_names,
             nodes,
             roots,
         }
     }
 
+    fn default_base_path(group_name: &Option<String>, bench_name: &String) -> PathBuf {
+        let mut path = cargo_target_directory()
+            .unwrap_or_else(|| PathBuf::from("target"))
+            .join("profiler");
+        if let Some(group) = &group_name {
+            path = path.join(sanitize_path_segment(group));
+        }
+        path = path.join(sanitize_path_segment(bench_name));
+        path
+    }
+
+    pub fn write_snapshot_to_default_path(&self) -> io::Result<PathBuf> {
+        let mut path = Self::default_base_path(&self.data.group_name, &self.data.bench_name);
+        path = path.join("events.json");
+        self.write_snapshot(&path)?;
+        Ok(path)
+    }
+
+    pub fn write_snapshot(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        json::write_snapshot(self, path.as_ref())
+    }
+
+    pub fn write_aggregated_json_to_default_path(&self) -> io::Result<PathBuf> {
+        let mut path = Self::default_base_path(&self.data.group_name, &self.data.bench_name);
+        path = path.join("run.json");
+        self.write_aggregated_json(&path)?;
+        Ok(path)
+    }
+
+    pub fn write_aggregated_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        json::write_aggregated_json(self, path.as_ref())
+    }
+}
+
+pub struct ReportPrinter<'a, M: Metrics> {
+    pub report: &'a AnalyzedReport<M>,
+}
+
+impl<'a, M: Metrics> ReportPrinter<'a, M> {
     pub fn print(&self) {
-        if self.nodes.is_empty() {
+        if self.report.nodes.is_empty() {
             println!("No profiling data.");
             return;
         }
 
-        let n_metrics = self.metric_names.len();
+        let n_metrics = self.report.metric_names.len();
         let layout = PrintLayout {
             // Give flat path a bit more room maybe, but keep standard for now
             label_w: LABEL_W,
@@ -270,7 +303,7 @@ impl<M: Metrics> Report<M> {
 
         // Table header
         print!("{:<label_w$}", "", label_w = layout.label_w);
-        for name in &self.metric_names {
+        for name in &self.report.metric_names {
             print!(
                 "{:gap$}{:>w$}",
                 "",
@@ -282,14 +315,14 @@ impl<M: Metrics> Report<M> {
         println!("\x1b[0m");
         println!("{}", sep);
 
-        for root_key in &self.roots {
+        for root_key in &self.report.roots {
             self.print_node(root_key, layout);
         }
     }
 
     /// Print a collection of reports grouped, with group headers and separators.
     /// All output lives here — callers just pass in the reports.
-    pub fn print_all(reports: &[Self]) {
+    pub fn print_all(reports: &[AnalyzedReport<M>]) {
         if reports.is_empty() {
             return;
         }
@@ -302,7 +335,7 @@ impl<M: Metrics> Report<M> {
         let mut bench_index_in_group: usize = 0;
 
         for report in reports {
-            let group = &report.group_name;
+            let group = &report.data.group_name;
             if current_group != Some(group) {
                 if let Some(g) = group {
                     // println!("\n{}", thick);
@@ -314,80 +347,16 @@ impl<M: Metrics> Report<M> {
             } else if bench_index_in_group > 0 {
                 println!("{}", thin);
             }
-            report.print();
+            let printer = ReportPrinter { report };
+            printer.print();
             bench_index_in_group += 1;
         }
-    }
-
-    pub fn write_json_to_default_path(&self) -> io::Result<PathBuf> {
-        let mut path = PathBuf::from("target").join("profiler");
-        if let Some(group) = &self.group_name {
-            path = path.join(sanitize_path_segment(group));
-        }
-        path = path
-            .join(sanitize_path_segment(&self.bench_name))
-            .join("run.json");
-        self.write_json(&path)?;
-        Ok(path)
-    }
-
-    pub fn write_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let report = self.to_json();
-        let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, &report).map_err(io::Error::other)
-    }
-
-    fn to_json(&self) -> JsonReport {
-        let roots = self
-            .roots
-            .iter()
-            .filter_map(|root| self.to_json_node(root))
-            .collect();
-
-        JsonReport {
-            schema_version: 1,
-            group: self.group_name.clone(),
-            name: self.bench_name.clone(),
-            metric_names: self.metric_names.clone(),
-            roots,
-        }
-    }
-
-    fn to_json_node(&self, key: &str) -> Option<JsonSpanNode> {
-        let node = self.nodes.get(key)?;
-
-        if node.samples.is_empty() {
-            return None;
-        }
-
-        let stats = self.compute_metric_stats(node);
-        let mut metrics = BTreeMap::new();
-        for (metric_name, stat) in self.metric_names.iter().zip(stats.iter()) {
-            metrics.insert(metric_name.clone(), stat.clone());
-        }
-
-        let children = node
-            .children
-            .iter()
-            .filter_map(|child_key| self.to_json_node(child_key))
-            .collect();
-
-        Some(JsonSpanNode {
-            name: node.name.clone(),
-            samples: node.samples.len(),
-            metrics,
-            children,
-        })
     }
 
     fn format_flat_path(&self, key: &str, max_len: usize) -> String {
         let mut parts: Vec<&str> = key.split('/').collect();
         if !parts.is_empty() {
-            parts[0] = &self.bench_name;
+            parts[0] = &self.report.data.bench_name;
         }
 
         let n = parts.len();
@@ -450,7 +419,7 @@ impl<M: Metrics> Report<M> {
     }
 
     fn print_node(&self, key: &str, layout: PrintLayout) {
-        let node = match self.nodes.get(key) {
+        let node = match self.report.nodes.get(key) {
             Some(n) => n,
             None => return,
         };
@@ -482,7 +451,7 @@ impl<M: Metrics> Report<M> {
             label_w = layout.label_w
         );
         for (metric_idx, s) in stats.iter().enumerate() {
-            let (val, unit) = self.metrics.format_value(metric_idx, s.mean);
+            let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.mean);
             let spread_pct = s.spread() * 100.0;
             let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
             print!(
@@ -521,7 +490,7 @@ impl<M: Metrics> Report<M> {
     }
 
     fn compute_metric_stats(&self, node: &SpanNode) -> Vec<MetricStats> {
-        let n_metrics = self.metric_names.len();
+        let n_metrics = self.report.metric_names.len();
         (0..n_metrics)
             .map(|metric_idx| {
                 let vals: Vec<f64> = node
@@ -535,8 +504,8 @@ impl<M: Metrics> Report<M> {
     }
 
     fn format_compact_range(&self, metric_idx: usize, min: f64, max: f64) -> String {
-        let (lo, u1) = self.metrics.format_value(metric_idx, min);
-        let (hi, u2) = self.metrics.format_value(metric_idx, max);
+        let (lo, u1) = self.report.data.metrics.format_value(metric_idx, min);
+        let (hi, u2) = self.report.data.metrics.format_value(metric_idx, max);
 
         if u1 == u2 {
             if u1.is_empty() {
@@ -549,9 +518,6 @@ impl<M: Metrics> Report<M> {
         }
     }
 }
-
-// ── Formatting helpers ─────────────────────────────────────────
-
 fn sanitize_path_segment(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -565,4 +531,23 @@ fn sanitize_path_segment(value: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn cargo_target_directory() -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        target_directory: PathBuf,
+    }
+
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let output =
+                std::process::Command::new(std::env::var_os("CARGO").unwrap_or("cargo".into()))
+                    .args(["metadata", "--format-version", "1"])
+                    .output()
+                    .ok()?;
+            let metadata: Metadata = serde_json::from_slice(&output.stdout).ok()?;
+            Some(metadata.target_directory)
+        })
 }

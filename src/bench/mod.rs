@@ -5,7 +5,7 @@ use std::time::Duration;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
-use self::report::Report;
+use self::report::{AnalyzedReport, ReportPrinter};
 use crate::{Collector, Metrics};
 
 mod default_metrics;
@@ -163,13 +163,16 @@ where
     }
 
     /// Run all registered benchmarks and display the report.
-    pub fn start(mut self) {
+    pub fn start(mut self)
+    where
+        M::Result: serde::Serialize,
+    {
         use tracing_subscriber::layer::SubscriberExt;
 
         self.benchmarks
             .sort_by(|a, b| (&a.config.group_name, &a.name).cmp(&(&b.config.group_name, &b.name)));
 
-        let mut reports: Vec<Report<M>> = Vec::new();
+        let mut reports: Vec<AnalyzedReport<M>> = Vec::new();
 
         for NamedBench { name, func, config } in &mut self.benchmarks {
             // Phase 1: Warmup — collector NOT installed as subscriber.
@@ -197,19 +200,19 @@ where
 
             let entries = self.collector.drain();
             let metrics = self.collector.metrics();
-            let report = Report::from_profile_entries(
+            let report = AnalyzedReport::from_profile_entries(
                 &entries,
                 Arc::clone(metrics),
                 config.group_name.clone(),
                 name.clone(),
             );
-            if let Err(error) = report.write_json_to_default_path() {
+            if let Err(error) = report.write_snapshot_to_default_path() {
                 eprintln!("Failed to save baseline JSON for {}: {}", name, error);
             }
             reports.push(report);
         }
 
-        Report::print_all(&reports);
+        ReportPrinter::print_all(&reports);
     }
 }
 
