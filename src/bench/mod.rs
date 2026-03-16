@@ -1,11 +1,15 @@
 use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::Duration;
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
-use self::report::{AnalyzedReport, ReportPrinter, json::JsonReport};
+use self::report::{
+    AnalysisProgress, AnalysisProgressState, AnalyzedReport, ReportPrinter, json::JsonReport,
+};
 use crate::{Collector, Metrics};
 
 mod default_metrics;
@@ -173,6 +177,270 @@ impl Bencher {
         std::mem::take(&mut self.iter_fn)
     }
 }
+
+const PROGRESS_BAR_WIDTH: usize = 28;
+const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const ANALYSIS_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
+const SPINNER_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
+
+impl BenchConfig {
+    fn display_name(&self, bench_name: &str) -> String {
+        match &self.group_name {
+            Some(group) => format!("{}/{}", group, bench_name),
+            None => bench_name.to_string(),
+        }
+    }
+
+    fn measured_progress(&self, iter: usize, elapsed: Duration) -> f64 {
+        let iter_progress = if self.num_iters == 0 {
+            1.0
+        } else {
+            (iter as f64 / self.num_iters as f64).min(1.0)
+        };
+        let time_progress = if self.min_run_time.is_zero() {
+            1.0
+        } else {
+            (elapsed.as_secs_f64() / self.min_run_time.as_secs_f64()).min(1.0)
+        };
+
+        iter_progress.min(time_progress)
+    }
+}
+
+struct BenchProgress {
+    enabled: bool,
+    label: String,
+    spinner_frame: usize,
+    last_rendered_at: Option<Instant>,
+}
+
+impl BenchProgress {
+    fn new(label: String) -> Self {
+        Self {
+            enabled: io::stdout().is_terminal(),
+            label,
+            spinner_frame: 0,
+            last_rendered_at: None,
+        }
+    }
+
+    fn render_warmup(&mut self, elapsed: Duration, total: Duration, force: bool) {
+        if !self.should_render(force) {
+            return;
+        }
+
+        let frame = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+        self.spinner_frame += 1;
+        self.render_line(&format!(
+            "[{}] Warmup {:>5.1}/{:<4.1}s {}",
+            frame,
+            elapsed.as_secs_f64().min(total.as_secs_f64()),
+            total.as_secs_f64(),
+            self.label
+        ));
+    }
+
+    fn render_measured(
+        &mut self,
+        iter: usize,
+        elapsed: Duration,
+        config: &BenchConfig,
+        force: bool,
+    ) {
+        if !self.should_render(force) {
+            return;
+        }
+
+        let progress = config.measured_progress(iter, elapsed);
+        let percent = (progress * 100.0).round() as usize;
+        let bar = progress_bar(progress, PROGRESS_BAR_WIDTH);
+        self.render_line(&format!(
+            "[run] [{}] {:>3}% {} iter {:>6} elapsed {:>7.2}s",
+            bar,
+            percent.min(100),
+            self.label,
+            iter,
+            elapsed.as_secs_f64()
+        ));
+    }
+
+    fn with_analysis_progress<T>(
+        &self,
+        f: impl FnOnce(Option<&mut dyn AnalysisProgress>) -> T,
+    ) -> T {
+        if !self.enabled {
+            return f(None);
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let analysis_state = Arc::new(Mutex::new(None::<AnalysisProgressState>));
+        let analysis_state_for_thread = Arc::clone(&analysis_state);
+        let spinner_label = self.label.clone();
+        let spinner_stop = Arc::clone(&stop);
+        let spinner_handle = std::thread::spawn(move || {
+            let mut frame = 0usize;
+            loop {
+                if spinner_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let current = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+                frame += 1;
+                let state = *analysis_state_for_thread.lock().unwrap();
+                let line = match state {
+                    Some(state) => format!(
+                        "[{}] Analysis {} {}/{} {}",
+                        current,
+                        state.phase.label(),
+                        state.completed,
+                        state.total,
+                        spinner_label
+                    ),
+                    None => format!("[{}] Analysis {}", current, spinner_label),
+                };
+
+                let mut stdout = io::stdout().lock();
+                let _ = write!(stdout, "\r\x1b[2K{}", line);
+                let _ = stdout.flush();
+                drop(stdout);
+
+                std::thread::sleep(ANALYSIS_PROGRESS_UPDATE_INTERVAL);
+            }
+        });
+
+        let mut progress = TerminalAnalysisProgress::new(analysis_state);
+        let result = f(Some(&mut progress));
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = spinner_handle.join();
+
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "\r\x1b[2K");
+        let _ = stdout.flush();
+
+        result
+    }
+
+    fn with_phase_spinner<T>(&self, phase: &str, f: impl FnOnce() -> T) -> T {
+        if !self.enabled {
+            return f();
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner_label = self.label.clone();
+        let spinner_phase = phase.to_string();
+        let spinner_stop = Arc::clone(&stop);
+        let spinner_handle = std::thread::spawn(move || {
+            let mut frame = 0usize;
+            loop {
+                if spinner_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let current = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+                frame += 1;
+
+                let mut stdout = io::stdout().lock();
+                let _ = write!(
+                    stdout,
+                    "\r\x1b[2K[{}] {} {}",
+                    current, spinner_phase, spinner_label
+                );
+                let _ = stdout.flush();
+                drop(stdout);
+
+                std::thread::sleep(ANALYSIS_PROGRESS_UPDATE_INTERVAL);
+            }
+        });
+
+        let result = f();
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = spinner_handle.join();
+
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "\r\x1b[2K");
+        let _ = stdout.flush();
+
+        result
+    }
+
+    fn finish(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "\r\x1b[2K");
+        let _ = stdout.flush();
+    }
+
+    fn should_render(&mut self, force: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let now = Instant::now();
+        let should_render = force
+            || self
+                .last_rendered_at
+                .is_none_or(|last| now.duration_since(last) >= PROGRESS_UPDATE_INTERVAL);
+        if should_render {
+            self.last_rendered_at = Some(now);
+        }
+        should_render
+    }
+
+    fn render_line(&self, line: &str) {
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "\r\x1b[2K{}", line);
+        let _ = stdout.flush();
+    }
+}
+
+struct TerminalAnalysisProgress {
+    last_update_at: Option<Instant>,
+    latest: Arc<Mutex<Option<AnalysisProgressState>>>,
+}
+
+impl TerminalAnalysisProgress {
+    fn new(latest: Arc<Mutex<Option<AnalysisProgressState>>>) -> Self {
+        Self {
+            last_update_at: None,
+            latest,
+        }
+    }
+}
+
+impl AnalysisProgress for TerminalAnalysisProgress {
+    fn update(&mut self, state: AnalysisProgressState) {
+        let now = Instant::now();
+        let should_publish = self
+            .last_update_at
+            .is_none_or(|last| now.duration_since(last) >= ANALYSIS_PROGRESS_UPDATE_INTERVAL)
+            || state.completed == state.total
+            || self
+                .latest
+                .lock()
+                .unwrap()
+                .is_none_or(|prev| prev.phase != state.phase);
+
+        if !should_publish {
+            return;
+        }
+
+        *self.latest.lock().unwrap() = Some(state);
+        self.last_update_at = Some(now);
+    }
+}
+
+fn progress_bar(progress: f64, width: usize) -> String {
+    let progress = progress.clamp(0.0, 1.0);
+    let filled = (progress * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "=".repeat(filled), " ".repeat(width - filled))
+}
+
 pub struct NamedBench {
     name: String,
     config: BenchConfig,
@@ -251,41 +519,60 @@ where
         let mut reports: Vec<(AnalyzedReport<M>, Option<JsonReport>)> = Vec::new();
 
         for NamedBench { name, func, config } in &mut self.benchmarks {
-            // Phase 1: Warmup — collector NOT installed as subscriber.
+            let mut progress = BenchProgress::new(config.display_name(name));
+
             let subscriber = tracing_subscriber::registry().with(self.collector.clone());
             let _guard = tracing::subscriber::set_default(subscriber);
-            for _ in 0..config.warmup_seconds {
+
+            // Phase 1: Warmup — collector NOT installed as subscriber.
+            let warmup_duration = Duration::from_secs(config.warmup_seconds as u64);
+            let warmup_start = Instant::now();
+            progress.render_warmup(Duration::ZERO, warmup_duration, true);
+            while warmup_start.elapsed() < warmup_duration {
                 func(black_box(
                     tracing::info_span!(target: "profiler", "bench", name = name).into(),
                 ));
+                progress.render_warmup(warmup_start.elapsed(), warmup_duration, false);
             }
+            progress.render_warmup(warmup_duration, warmup_duration, true);
             let _ = self.collector.drain();
 
             // Phase 2: Measured — install collector for the measurement window.
             {
-                let start = std::time::Instant::now();
+                let start = Instant::now();
+                progress.render_measured(0, Duration::ZERO, config, true);
                 for iter in 1.. {
                     func(black_box(
                         tracing::info_span!(target: "profiler", "bench", name = name).into(),
                     ));
-                    if iter >= config.num_iters && start.elapsed() >= config.min_run_time {
+                    let elapsed = start.elapsed();
+                    let done = iter >= config.num_iters && elapsed >= config.min_run_time;
+                    progress.render_measured(iter, elapsed, config, done);
+                    if done {
                         break;
                     }
                 }
             }
+            progress.finish();
 
             let entries = self.collector.drain();
             let metrics = self.collector.metrics();
-            let report = AnalyzedReport::from_profile_entries(
-                &entries,
-                Arc::clone(metrics),
-                config.group_name.clone(),
-                name.clone(),
-            );
+            let report = progress.with_analysis_progress(|analysis_progress| {
+                AnalyzedReport::from_profile_entries_with_progress(
+                    &entries,
+                    Arc::clone(metrics),
+                    config.group_name.clone(),
+                    name.clone(),
+                    analysis_progress,
+                )
+            });
+            let baseline = progress.with_phase_spinner("Load baseline", || {
+                report.read_aggregated_json_from_default_path().ok()
+            });
 
-            let baseline = report.read_aggregated_json_from_default_path().ok();
-
-            if let Err(error) = report.write_snapshot_to_default_path() {
+            if let Err(error) = progress
+                .with_phase_spinner("Write snapshot", || report.write_snapshot_to_default_path())
+            {
                 eprintln!("Failed to save baseline JSON for {}: {}", name, error);
             }
             reports.push((report, baseline));
@@ -328,5 +615,36 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_name_includes_group_when_present() {
+        let config = BenchConfig {
+            warmup_seconds: 3,
+            num_iters: 10,
+            min_run_time: Duration::from_secs(1),
+            group_name: Some("parser".to_string()),
+        };
+
+        assert_eq!(config.display_name("chunks"), "parser/chunks");
+    }
+
+    #[test]
+    fn measured_progress_waits_for_both_iteration_and_time_thresholds() {
+        let config = BenchConfig {
+            warmup_seconds: 0,
+            num_iters: 10,
+            min_run_time: Duration::from_secs(4),
+            group_name: None,
+        };
+
+        assert_eq!(config.measured_progress(10, Duration::from_secs(1)), 0.25);
+        assert_eq!(config.measured_progress(2, Duration::from_secs(4)), 0.2);
+        assert_eq!(config.measured_progress(10, Duration::from_secs(4)), 1.0);
     }
 }

@@ -99,6 +99,34 @@ pub struct AnalyzedReport<M: Metrics> {
     pub roots: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalysisPhase {
+    FillPublished,
+    AggregatePublished,
+    FinalizeSorting,
+}
+
+impl AnalysisPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            AnalysisPhase::FillPublished => "raw spans",
+            AnalysisPhase::AggregatePublished => "aggregate spans",
+            AnalysisPhase::FinalizeSorting => "sort medians",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisProgressState {
+    pub phase: AnalysisPhase,
+    pub completed: usize,
+    pub total: usize,
+}
+
+pub trait AnalysisProgress {
+    fn update(&mut self, state: AnalysisProgressState);
+}
+
 const PRIMARY_METRIC_IDX: usize = 0;
 const LABEL_W: usize = 34;
 const COL_W: usize = 20;
@@ -133,6 +161,20 @@ impl<M: Metrics> AnalyzedReport<M> {
         M::Result: Debug,
         M::Start: Debug,
     {
+        Self::from_profile_entries_with_progress(entries, metrics, group_name, bench_name, None)
+    }
+
+    pub fn from_profile_entries_with_progress(
+        entries: &[ProfileEntry<M::Start, M::Result>],
+        metrics: Arc<M>,
+        group_name: Option<String>,
+        bench_name: String,
+        mut progress: Option<&mut dyn AnalysisProgress>,
+    ) -> Self
+    where
+        M::Result: Debug,
+        M::Start: Debug,
+    {
         fn compute_key(
             id: &Id,
             span_info: &HashMap<Id, (&'static str, Option<Id>)>,
@@ -157,7 +199,13 @@ impl<M: Metrics> AnalyzedReport<M> {
 
         // list of spans currently "in flight"
         let mut span_frame: HashMap<Id, (&'static str, Option<Id>)> = HashMap::new();
-        for entry in entries {
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::FillPublished,
+            0,
+            entries.len(),
+        );
+        for (idx, entry) in entries.iter().enumerate() {
             match entry {
                 // Phase 1: map span Id → (name, parent_id) from Register entries.
                 ProfileEntry::Register {
@@ -184,16 +232,25 @@ impl<M: Metrics> AnalyzedReport<M> {
                     span_frame.remove(id);
                 }
             }
+            publish_progress(
+                &mut progress,
+                AnalysisPhase::FillPublished,
+                idx + 1,
+                entries.len(),
+            );
         }
 
-        Self::from_published_entries(published, metrics, group_name, bench_name)
+        Self::from_published_entries_with_progress(
+            published, metrics, group_name, bench_name, progress,
+        )
     }
 
-    fn from_published_entries(
+    fn from_published_entries_with_progress(
         published: Vec<(Vec<String>, M::Result)>,
         metrics: Arc<M>,
         group_name: Option<String>,
         bench_name: String,
+        mut progress: Option<&mut dyn AnalysisProgress>,
     ) -> Self {
         fn format_path(path: &[String]) -> String {
             path.join("/")
@@ -203,7 +260,13 @@ impl<M: Metrics> AnalyzedReport<M> {
         let mut roots: Vec<String> = Vec::new();
         let mut root_set: HashSet<String> = HashSet::new();
 
-        for (path, result) in &published {
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::AggregatePublished,
+            0,
+            published.len(),
+        );
+        for (idx, (path, result)) in published.iter().enumerate() {
             let values = metrics.result_to_f64s(result);
 
             let key = format_path(path);
@@ -237,21 +300,54 @@ impl<M: Metrics> AnalyzedReport<M> {
             } else if root_set.insert(key.clone()) {
                 roots.push(key.clone());
             }
+
+            publish_progress(
+                &mut progress,
+                AnalysisPhase::AggregatePublished,
+                idx + 1,
+                published.len(),
+            );
         }
+
+        let node_keys: Vec<String> = nodes.keys().cloned().collect();
+        let finalize_total = node_keys.len() + 2;
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::FinalizeSorting,
+            0,
+            finalize_total,
+        );
 
         let primary_medians: HashMap<String, f64> = nodes
             .iter()
             .map(|(key, node)| (key.clone(), primary_metric_median(&node.samples)))
             .collect();
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::FinalizeSorting,
+            1,
+            finalize_total,
+        );
 
         roots.sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::FinalizeSorting,
+            2,
+            finalize_total,
+        );
 
-        let node_keys: Vec<String> = nodes.keys().cloned().collect();
-        for key in node_keys {
+        for (idx, key) in node_keys.into_iter().enumerate() {
             if let Some(node) = nodes.get_mut(&key) {
                 node.children
                     .sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
             }
+            publish_progress(
+                &mut progress,
+                AnalysisPhase::FinalizeSorting,
+                idx + 3,
+                finalize_total,
+            );
         }
 
         let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
@@ -315,6 +411,21 @@ impl<M: Metrics> AnalyzedReport<M> {
             JsonFile::Aggregated,
         );
         json::read_aggregated_json(&path)
+    }
+}
+
+fn publish_progress(
+    progress: &mut Option<&mut dyn AnalysisProgress>,
+    phase: AnalysisPhase,
+    completed: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.update(AnalysisProgressState {
+            phase,
+            completed,
+            total,
+        });
     }
 }
 
@@ -774,8 +885,13 @@ fn cargo_target_directory() -> Option<PathBuf> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{AnalyzedReport, MetricStats, ReportPrinter, json};
-    use crate::Metrics;
+    use tracing::Id;
+
+    use super::{
+        AnalysisPhase, AnalysisProgress, AnalysisProgressState, AnalyzedReport, MetricStats,
+        ReportPrinter, json,
+    };
+    use crate::{Metrics, ProfileEntry};
 
     #[derive(Default)]
     struct TestMetrics;
@@ -816,16 +932,84 @@ mod tests {
             })
             .collect();
 
-        AnalyzedReport::from_published_entries(
+        AnalyzedReport::from_published_entries_with_progress(
             published,
             Arc::new(TestMetrics),
             None,
             "bench".to_string(),
+            None,
         )
     }
 
     fn stats(values: &[f64]) -> MetricStats {
         MetricStats::from_values(values)
+    }
+
+    #[derive(Default)]
+    struct CapturedProgress {
+        updates: Vec<AnalysisProgressState>,
+    }
+
+    impl AnalysisProgress for CapturedProgress {
+        fn update(&mut self, state: AnalysisProgressState) {
+            self.updates.push(state);
+        }
+    }
+
+    #[test]
+    fn reports_analysis_progress_for_both_internal_phases() {
+        let id = Id::from_u64(1);
+        let entries = vec![
+            ProfileEntry::Register {
+                id: id.clone(),
+                metadata: None,
+                parent: None,
+                start: (),
+            },
+            ProfileEntry::Publish {
+                id,
+                result: [10.0, 20.0],
+            },
+        ];
+        let mut progress = CapturedProgress::default();
+
+        let _ = AnalyzedReport::from_profile_entries_with_progress(
+            &entries,
+            Arc::new(TestMetrics),
+            None,
+            "bench".to_string(),
+            Some(&mut progress),
+        );
+
+        assert_eq!(
+            progress.updates.first().copied(),
+            Some(AnalysisProgressState {
+                phase: AnalysisPhase::FillPublished,
+                completed: 0,
+                total: 2,
+            })
+        );
+        assert!(progress.updates.contains(&AnalysisProgressState {
+            phase: AnalysisPhase::FillPublished,
+            completed: 2,
+            total: 2,
+        }));
+        assert!(progress.updates.contains(&AnalysisProgressState {
+            phase: AnalysisPhase::AggregatePublished,
+            completed: 0,
+            total: 1,
+        }));
+        assert!(progress.updates.iter().any(|state| {
+            state.phase == AnalysisPhase::FinalizeSorting && state.completed == 0
+        }));
+        assert_eq!(
+            progress.updates.last().copied(),
+            Some(AnalysisProgressState {
+                phase: AnalysisPhase::FinalizeSorting,
+                completed: 3,
+                total: 3,
+            })
+        );
     }
 
     #[test]
