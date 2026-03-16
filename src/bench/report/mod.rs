@@ -99,6 +99,7 @@ pub struct AnalyzedReport<M: Metrics> {
     pub roots: Vec<String>,
 }
 
+const PRIMARY_METRIC_IDX: usize = 0;
 const LABEL_W: usize = 34;
 const COL_W: usize = 20;
 const COL_GAP: usize = 5;
@@ -132,8 +133,6 @@ impl<M: Metrics> AnalyzedReport<M> {
         M::Result: Debug,
         M::Start: Debug,
     {
-        let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
-
         fn compute_key(
             id: &Id,
             span_info: &HashMap<Id, (&'static str, Option<Id>)>,
@@ -187,11 +186,19 @@ impl<M: Metrics> AnalyzedReport<M> {
             }
         }
 
+        Self::from_published_entries(published, metrics, group_name, bench_name)
+    }
+
+    fn from_published_entries(
+        published: Vec<(Vec<String>, M::Result)>,
+        metrics: Arc<M>,
+        group_name: Option<String>,
+        bench_name: String,
+    ) -> Self {
         fn format_path(path: &[String]) -> String {
             path.join("/")
         }
 
-        // Phase 3: aggregate Publish entries by key.
         let mut nodes: HashMap<String, SpanNode> = HashMap::new();
         let mut roots: Vec<String> = Vec::new();
         let mut root_set: HashSet<String> = HashSet::new();
@@ -212,10 +219,8 @@ impl<M: Metrics> AnalyzedReport<M> {
                 .samples
                 .push(values);
 
-            // Register parent→child relationship.
-            let parts: Vec<&str> = key.rsplitn(2, '/').collect();
-            if parts.len() == 2 {
-                let parent_key = parts[1].to_string();
+            if let Some(parent_key) = parent_key(key.as_str()) {
+                let parent_key = parent_key.to_string();
                 let parent_name = parent_key
                     .rsplit('/')
                     .next()
@@ -229,18 +234,27 @@ impl<M: Metrics> AnalyzedReport<M> {
                 if !pnode.children.contains(&key) {
                     pnode.children.push(key.clone());
                 }
-            } else {
-                // This is a root.
-                if root_set.insert(key.clone()) {
-                    roots.push(key.clone());
-                }
+            } else if root_set.insert(key.clone()) {
+                roots.push(key.clone());
             }
         }
 
-        roots.sort();
-        for node in nodes.values_mut() {
-            node.children.sort();
+        let primary_medians: HashMap<String, f64> = nodes
+            .iter()
+            .map(|(key, node)| (key.clone(), primary_metric_median(&node.samples)))
+            .collect();
+
+        roots.sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
+
+        let node_keys: Vec<String> = nodes.keys().cloned().collect();
+        for key in node_keys {
+            if let Some(node) = nodes.get_mut(&key) {
+                node.children
+                    .sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
+            }
         }
+
+        let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
 
         Self {
             data: RawData {
@@ -473,7 +487,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
 
         let baseline_stats = self
             .baseline
-            .and_then(|b| b.nodes.get(key).map(|n| &n.stats));
+            .and_then(|b| b.nodes.get(key).map(|n| n.stats.as_slice()));
 
         // Row 1: name(count) and median ± spread%
         print!(
@@ -508,11 +522,97 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         }
         println!();
 
-        // Row 2: Either difference to baseline or skip
+        let parent_share_label = self
+            .parent_share_text(key)
+            .map(|text| format!("  {}", text));
+
+        for (idx, row) in self
+            .detail_rows_for_node(&stats, baseline_stats)
+            .into_iter()
+            .enumerate()
+        {
+            let label = if idx == 0 {
+                parent_share_label.as_deref().unwrap_or("")
+            } else {
+                ""
+            };
+            self.print_labeled_detail_row(label, &row, layout);
+        }
+
+        for child_key in &node.children {
+            self.print_node(child_key, layout);
+        }
+    }
+
+    fn print_labeled_detail_row(&self, label: &str, row: &[String], layout: PrintLayout) {
+        let label_padding = layout.label_w.saturating_sub(label.chars().count());
+
+        print!("{}{:pad$}", label, "", pad = label_padding);
+
+        for cell in row {
+            let padding = layout.col_w.saturating_sub(visible_width(cell));
+            print!(
+                "{:gap$}{:pad$}{}",
+                "",
+                "",
+                cell,
+                gap = layout.col_gap,
+                pad = padding
+            );
+        }
+        println!();
+    }
+
+    fn detail_rows_for_node(
+        &self,
+        stats: &[MetricStats],
+        baseline_stats: Option<&[MetricStats]>,
+    ) -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+
         if baseline_stats.is_some() {
-            let detail_tree = String::new();
-            print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
-            for (metric_idx, s) in stats.iter().enumerate() {
+            rows.push(self.baseline_detail_cells(stats, baseline_stats));
+        }
+
+        rows.push(self.range_detail_cells(stats));
+        rows
+    }
+
+    fn parent_share_text(&self, key: &str) -> Option<String> {
+        let parent_key = parent_key(key)?;
+        let node = self.report.nodes.get(key)?;
+        let parent = self.report.nodes.get(parent_key);
+        let child_median = primary_metric_median(&node.samples);
+        let metric_name = self
+            .report
+            .metric_names
+            .get(PRIMARY_METRIC_IDX)
+            .map(String::as_str)
+            .unwrap_or("metric");
+
+        let text = match parent.map(|parent| primary_metric_median(&parent.samples)) {
+            Some(parent_median) if parent_median.abs() > f64::EPSILON => {
+                format!(
+                    "{:.0}% {} of parent",
+                    child_median / parent_median * 100.0,
+                    metric_name
+                )
+            }
+            _ => format!("n/a {} of parent", metric_name),
+        };
+
+        Some(text)
+    }
+
+    fn baseline_detail_cells(
+        &self,
+        stats: &[MetricStats],
+        baseline_stats: Option<&[MetricStats]>,
+    ) -> Vec<String> {
+        stats
+            .iter()
+            .enumerate()
+            .map(|(metric_idx, s)| {
                 if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
                     let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
                     let spread_pct = s.spread() * 100.0;
@@ -537,78 +637,32 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                         format!("{:.2}%", diff_pct)
                     };
 
-                    let raw_cell = format!("{}{} ± {:.0}% ({})", val, unit, spread_pct, diff_str);
-                    let colored_cell = format!(
+                    format!(
                         "{}{} ± {:.0}% ({}{}{})",
                         val, unit, spread_pct, color, diff_str, reset
-                    );
-
-                    let cell_len = raw_cell.chars().count();
-                    let padding = layout.col_w.saturating_sub(cell_len);
-                    print!(
-                        "{:gap$}{:pad$}{}",
-                        "",
-                        "",
-                        colored_cell,
-                        gap = layout.col_gap,
-                        pad = padding
-                    );
+                    )
                 } else {
                     let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
                     let spread_pct = s.spread() * 100.0;
-                    let raw_cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
-                    let cell_len = raw_cell.chars().count();
-                    let padding = layout.col_w.saturating_sub(cell_len);
-                    print!(
-                        "{:gap$}{:pad$}{}",
-                        "",
-                        "",
-                        raw_cell,
-                        gap = layout.col_gap,
-                        pad = padding
-                    );
+                    format!("{}{} ± {:.0}%", val, unit, spread_pct)
                 }
-            }
-            println!();
-        }
+            })
+            .collect()
+    }
 
-        // Row 3 (or 2 if no baseline): compact [min..max]
-        {
-            let detail_tree = String::new();
-            print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
-            for (metric_idx, s) in stats.iter().enumerate() {
+    fn range_detail_cells(&self, stats: &[MetricStats]) -> Vec<String> {
+        stats
+            .iter()
+            .enumerate()
+            .map(|(metric_idx, s)| {
                 let range = self.format_compact_range(metric_idx, s.min, s.max);
-                let cell = format!("\x1b[2m{}\x1b[0m", range);
-                let padding = layout.col_w.saturating_sub(range.chars().count());
-                print!(
-                    "{:gap$}{:pad$}{}",
-                    "",
-                    "",
-                    cell,
-                    gap = layout.col_gap,
-                    pad = padding
-                );
-            }
-            println!();
-        }
-
-        for child_key in &node.children {
-            self.print_node(child_key, layout);
-        }
+                format!("\x1b[2m{}\x1b[0m", range)
+            })
+            .collect()
     }
 
     fn compute_metric_stats(&self, node: &SpanNode) -> Vec<MetricStats> {
-        let n_metrics = self.report.metric_names.len();
-        (0..n_metrics)
-            .map(|metric_idx| {
-                let vals: Vec<f64> = node
-                    .samples
-                    .iter()
-                    .filter_map(|sample| sample.get(metric_idx).copied())
-                    .collect();
-                MetricStats::from_values(&vals)
-            })
-            .collect()
+        compute_metric_stats_for_samples(&node.samples, self.report.metric_names.len())
     }
 
     fn format_compact_range(&self, metric_idx: usize, min: f64, max: f64) -> String {
@@ -626,6 +680,62 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         }
     }
 }
+
+fn compute_metric_stats_for_samples(samples: &[Vec<f64>], n_metrics: usize) -> Vec<MetricStats> {
+    (0..n_metrics)
+        .map(|metric_idx| {
+            let vals: Vec<f64> = samples
+                .iter()
+                .filter_map(|sample| sample.get(metric_idx).copied())
+                .collect();
+            MetricStats::from_values(&vals)
+        })
+        .collect()
+}
+
+fn primary_metric_median(samples: &[Vec<f64>]) -> f64 {
+    compute_metric_stats_for_samples(samples, PRIMARY_METRIC_IDX + 1)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+        .median
+}
+
+fn compare_node_keys_by_primary_metric(
+    a: &str,
+    b: &str,
+    primary_medians: &HashMap<String, f64>,
+) -> std::cmp::Ordering {
+    let a_metric = primary_medians.get(a).copied().unwrap_or_default();
+    let b_metric = primary_medians.get(b).copied().unwrap_or_default();
+
+    b_metric.total_cmp(&a_metric).then_with(|| a.cmp(b))
+}
+
+fn parent_key(key: &str) -> Option<&str> {
+    key.rsplit_once('/').map(|(parent, _)| parent)
+}
+
+fn visible_width(value: &str) -> usize {
+    let mut width = 0;
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for esc in chars.by_ref() {
+                if esc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+    }
+
+    width
+}
+
 fn sanitize_path_segment(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -658,4 +768,185 @@ fn cargo_target_directory() -> Option<PathBuf> {
             let metadata: Metadata = serde_json::from_slice(&output.stdout).ok()?;
             Some(metadata.target_directory)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{AnalyzedReport, MetricStats, ReportPrinter, json};
+    use crate::Metrics;
+
+    #[derive(Default)]
+    struct TestMetrics;
+
+    impl Metrics for TestMetrics {
+        type Start = ();
+        type Result = [f64; 2];
+
+        fn start(&self) -> Self::Start {}
+
+        fn end(&self, _start: Self::Start) -> Self::Result {
+            [0.0, 0.0]
+        }
+
+        fn metrics_names() -> &'static [&'static str] {
+            &["primary", "secondary"]
+        }
+
+        fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64 {
+            result[metric_idx]
+        }
+
+        fn format_value(&self, _metric_idx: usize, value: f64) -> (String, &'static str) {
+            (format!("{value:.1}"), "")
+        }
+    }
+
+    fn report_from_published(entries: Vec<(Vec<&str>, [f64; 2])>) -> AnalyzedReport<TestMetrics> {
+        let published = entries
+            .into_iter()
+            .map(|(path, result)| {
+                (
+                    path.into_iter()
+                        .map(|segment| segment.to_string())
+                        .collect(),
+                    result,
+                )
+            })
+            .collect();
+
+        AnalyzedReport::from_published_entries(
+            published,
+            Arc::new(TestMetrics),
+            None,
+            "bench".to_string(),
+        )
+    }
+
+    fn stats(values: &[f64]) -> MetricStats {
+        MetricStats::from_values(values)
+    }
+
+    #[test]
+    fn sorts_roots_by_primary_metric_descending() {
+        let report = report_from_published(vec![
+            (vec!["alpha"], [10.0, 500.0]),
+            (vec!["beta"], [30.0, 100.0]),
+            (vec!["gamma"], [20.0, 900.0]),
+        ]);
+
+        assert_eq!(report.roots, vec!["beta", "gamma", "alpha"]);
+    }
+
+    #[test]
+    fn sorts_siblings_by_primary_metric_not_secondary_metric() {
+        let report = report_from_published(vec![
+            (vec!["root"], [100.0, 0.0]),
+            (vec!["root", "alpha"], [10.0, 900.0]),
+            (vec!["root", "beta"], [20.0, 100.0]),
+        ]);
+
+        assert_eq!(
+            report.nodes.get("root").unwrap().children,
+            vec!["root/beta", "root/alpha"]
+        );
+    }
+
+    #[test]
+    fn breaks_primary_metric_ties_by_path() {
+        let report = report_from_published(vec![
+            (vec!["root"], [100.0, 0.0]),
+            (vec!["root", "beta"], [20.0, 1.0]),
+            (vec!["root", "alpha"], [20.0, 9.0]),
+        ]);
+
+        assert_eq!(
+            report.nodes.get("root").unwrap().children,
+            vec!["root/alpha", "root/beta"]
+        );
+    }
+
+    #[test]
+    fn computes_parent_share_from_primary_metric_median() {
+        let report = report_from_published(vec![
+            (vec!["root"], [10.0, 0.0]),
+            (vec!["root"], [30.0, 0.0]),
+            (vec!["root", "child"], [5.0, 0.0]),
+            (vec!["root", "child"], [15.0, 0.0]),
+        ]);
+        let printer = ReportPrinter {
+            report: &report,
+            baseline: None,
+        };
+
+        assert_eq!(printer.parent_share_text("root"), None);
+        assert_eq!(
+            printer.parent_share_text("root/child").as_deref(),
+            Some("50% primary of parent")
+        );
+    }
+
+    #[test]
+    fn renders_parent_share_as_na_when_parent_primary_metric_is_zero() {
+        let report = report_from_published(vec![
+            (vec!["root"], [0.0, 0.0]),
+            (vec!["root", "child"], [10.0, 0.0]),
+        ]);
+        let printer = ReportPrinter {
+            report: &report,
+            baseline: None,
+        };
+
+        assert_eq!(
+            printer.parent_share_text("root/child").as_deref(),
+            Some("n/a primary of parent")
+        );
+    }
+
+    #[test]
+    fn parent_share_is_moved_into_label_and_detail_rows_remain_compact() {
+        let report = report_from_published(vec![
+            (vec!["root"], [40.0, 4.0]),
+            (vec!["root", "child"], [20.0, 2.0]),
+        ]);
+        let baseline = json::JsonReport {
+            group: None,
+            name: "bench".to_string(),
+            metric_names: vec!["primary".to_string(), "secondary".to_string()],
+            nodes: [(
+                "root/child".to_string(),
+                json::JsonSpanNode {
+                    name: "child".to_string(),
+                    samples: 1,
+                    stats: vec![stats(&[10.0]), stats(&[1.0])],
+                    children: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec!["root".to_string()],
+        };
+        let printer = ReportPrinter {
+            report: &report,
+            baseline: Some(&baseline),
+        };
+
+        let node_stats = printer.compute_metric_stats(report.nodes.get("root/child").unwrap());
+        let rows = printer.detail_rows_for_node(
+            &node_stats,
+            baseline
+                .nodes
+                .get("root/child")
+                .map(|node| node.stats.as_slice()),
+        );
+
+        assert_eq!(
+            printer.parent_share_text("root/child").as_deref(),
+            Some("50% primary of parent")
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0][0].contains("+100.00%"));
+        assert!(rows[1][0].contains("[20.0 .. 20.0]"));
+    }
 }

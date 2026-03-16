@@ -125,17 +125,36 @@ impl Bencher {
     ///
     /// Example usage:
     /// ```
-    /// bencher.run_custom(|scope| {/* setup code */ scope.finish_setup(); /* measured code */ drop(scope) })
+    /// use profiler::bench::Bencher;
+    ///
+    /// let mut bencher = Bencher::new("example");
+    /// bencher.run_custom(|mut scope: profiler::bench::IterScope| {
+    ///     // setup code
+    ///     scope.finish_setup();
+    ///     // measured code
+    ///     drop(scope);
+    /// });
     /// ```
     ///
     /// For example, if you measure some sorting function:
     /// ```
-    /// bencher.run_custom(|scope| {
+    /// use profiler::bench::Bencher;
+    ///
+    /// fn generate_random_data() -> Vec<i32> {
+    ///     vec![3, 1, 2]
+    /// }
+    ///
+    /// fn sort(data: &mut [i32]) {
+    ///     data.sort_unstable();
+    /// }
+    ///
+    /// let mut bencher = Bencher::new("sort");
+    /// bencher.run_custom(|mut scope: profiler::bench::IterScope| {
     ///     let mut data = generate_random_data();
     ///     scope.finish_setup();
     ///     sort(&mut data);
-    ///     drop(scope); //optionally drop scope to avoid measuring of drop time of `data`
-    /// })
+    ///     drop(scope); // optionally drop scope to avoid measuring `data` drop time
+    /// });
     /// ```
     pub fn run_custom(&mut self, func: impl FnMut(IterScope) + 'static + Send) {
         assert_ne!(
