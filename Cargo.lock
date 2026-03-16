@@ -98,12 +98,23 @@ dependencies = [
 name = "profiler"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "perf-event",
+ "profiler_macros",
  "serde",
  "serde_json",
  "thread_local",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "profiler_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

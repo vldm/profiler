@@ -42,14 +42,6 @@ pub trait SingleMetric: Send + Sync + 'static {
     /// Final result captured at span exit.
     type Result: Clone + Send + 'static;
 
-    /// Initialize provider state (simple wrapper over `default()` - to simplify deriving).
-    fn init() -> Self
-    where
-        Self: Default,
-    {
-        Self::default()
-    }
-
     /// Capture intermediate state at span enter.
     fn start(&self) -> Self::Start;
 

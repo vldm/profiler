@@ -6,6 +6,7 @@
 //
 // Run with: cargo run --example basic
 
+use std::thread::sleep;
 use std::time::Duration;
 
 use profiler::bench::Bencher;
@@ -76,7 +77,10 @@ fn bench_pipeline() {
 fn bench_parse(bencher: &mut Bencher) {
     let data: Vec<u8> = (0..1024u16).flat_map(|x| x.to_le_bytes()).collect();
 
-    let group = bencher.group("parsing");
+    let group = bencher
+        .group("parsing")
+        .num_iters(1)
+        .min_run_time(Duration::from_nanos(1));
 
     let data_clone = data.clone();
     group.name("chunks").run(move || {
@@ -96,7 +100,7 @@ fn main() {
     use profiler::bench::*;
 
     let mut runner = BenchRunner::<MetricsProvider>::new();
-    // runner.register(WrapFn(bench_pipeline).parse("bench_pipeline"));
+    runner.register(WrapFn(bench_pipeline).parse("bench_pipeline"));
     runner.register(WrapFn(bench_parse).parse("bench_parse"));
 
     runner.run_all();

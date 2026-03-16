@@ -188,7 +188,6 @@ impl<M: Metrics> Report<M> {
                 }
             }
         }
-        dbg!(&published);
 
         fn format_path(path: &[&str]) -> String {
             path.join("/")
@@ -471,7 +470,6 @@ impl<M: Metrics> Report<M> {
                     format!("{}{}{}", prefix, parent_continuation, own_continuation)
                 }
             };
-            // dbg!(&detail_tree);
             print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
             for (metric_idx, s) in stats.iter().enumerate() {
                 let range = self.format_compact_range(metric_idx, s.min, s.max);
