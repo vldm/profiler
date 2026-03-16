@@ -104,7 +104,6 @@ struct JsonSpanNode {
 const LABEL_W: usize = 34;
 const COL_W: usize = 20;
 const COL_GAP: usize = 5;
-const MAX_TREE_DEPTH: usize = 3;
 
 /// Width of the full table for `n_metrics` columns. Use this when printing
 /// separators outside of `Report::print()` (e.g. in the bench runner).
@@ -262,6 +261,7 @@ impl<M: Metrics> Report<M> {
 
         let n_metrics = self.metric_names.len();
         let layout = PrintLayout {
+            // Give flat path a bit more room maybe, but keep standard for now
             label_w: LABEL_W,
             col_w: COL_W,
             col_gap: COL_GAP,
@@ -282,8 +282,8 @@ impl<M: Metrics> Report<M> {
         println!("\x1b[0m");
         println!("{}", sep);
 
-        for (idx, root_key) in self.roots.iter().enumerate() {
-            self.print_node(root_key, "", idx + 1 == self.roots.len(), true, 0, layout);
+        for root_key in &self.roots {
+            self.print_node(root_key, layout);
         }
     }
 
@@ -384,15 +384,72 @@ impl<M: Metrics> Report<M> {
         })
     }
 
-    fn print_node(
-        &self,
-        key: &str,
-        prefix: &str,
-        is_last: bool,
-        is_root: bool,
-        depth: usize,
-        layout: PrintLayout,
-    ) {
+    fn format_flat_path(&self, key: &str, max_len: usize) -> String {
+        let mut parts: Vec<&str> = key.split('/').collect();
+        if !parts.is_empty() {
+            parts[0] = &self.bench_name;
+        }
+
+        let n = parts.len();
+        if n == 0 {
+            return String::new();
+        }
+
+        let root = parts[0];
+        let leaf = parts[n - 1];
+
+        if n == 1 {
+            if root.chars().count() > max_len {
+                let trunc: String = root.chars().take(max_len.saturating_sub(3)).collect();
+                return format!("{}...", trunc);
+            }
+            return root.to_string();
+        }
+
+        // Try full path first
+        let full = parts.join("/");
+        if full.chars().count() <= max_len {
+            return full;
+        }
+
+        // Try collapsing intermediate parents: root/{depth}/leaf
+        let depth_str = if n > 2 {
+            format!("/{{{}}}/", n - 2)
+        } else {
+            "/".to_string()
+        };
+
+        let root_chars = root.chars().count();
+        let leaf_chars = leaf.chars().count();
+        let depth_chars = depth_str.chars().count();
+
+        if root_chars + depth_chars + leaf_chars <= max_len {
+            return format!("{}{}{}", root, depth_str, leaf);
+        }
+
+        // Truncate root if necessary, but keep at least a bit of it if possible
+        let available_for_root = max_len.saturating_sub(depth_chars + leaf_chars);
+        if available_for_root > 3 {
+            let t_root: String = root.chars().take(available_for_root - 3).collect();
+            return format!("{}...{}{}", t_root, depth_str, leaf);
+        }
+
+        // If leaf alone is too big (plus prefix), truncate leaf
+        let prefix = format!("{}...", &root[..1.min(root.len())]); // Just "R..."
+        let prefix_chars = prefix.chars().count() + depth_chars;
+
+        let available_for_leaf = max_len.saturating_sub(prefix_chars);
+        if available_for_leaf > 3 {
+            let t_leaf: String = leaf.chars().take(available_for_leaf - 3).collect();
+            return format!("{}{}{}...", prefix, depth_str, t_leaf);
+        }
+
+        // Extreme fallback
+        let trunc: String = full.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", trunc)
+    }
+
+    fn print_node(&self, key: &str, layout: PrintLayout) {
         let node = match self.nodes.get(key) {
             Some(n) => n,
             None => return,
@@ -403,26 +460,20 @@ impl<M: Metrics> Report<M> {
         }
 
         let stats = self.compute_metric_stats(node);
-
         let n_samples = node.samples.len();
-        let branch = if is_root {
-            ""
-        } else if is_last {
-            "└── "
-        } else {
-            "├── "
-        };
-        let node_display_name = if is_root {
-            self.bench_name.as_str()
-        } else {
-            node.name.as_str()
-        };
-        let is_compact = depth >= MAX_TREE_DEPTH;
-        let label = if is_compact {
-            format!("{}  └─{}  ({})", prefix, node_display_name, n_samples)
-        } else {
-            format!("{}{}{}  ({})", prefix, branch, node_display_name, n_samples)
-        };
+
+        let suffix = format!("  ({})", n_samples);
+        let suffix_len = suffix.chars().count();
+        let max_path_len = layout.label_w.saturating_sub(suffix_len);
+
+        let path_str = self.format_flat_path(key, max_path_len);
+        let mut label = format!("{}{}", path_str, suffix);
+
+        // Ensure the label does not exceed label_w (should be guaranteed by format_flat_path, but safety first)
+        if label.chars().count() > layout.label_w {
+            let trunc: String = label.chars().take(layout.label_w - 3).collect();
+            label = format!("{}...", trunc);
+        }
 
         // Row 1: name(count) and mean ± spread%
         print!(
@@ -446,30 +497,7 @@ impl<M: Metrics> Report<M> {
 
         // Row 2: compact [min..max]
         {
-            let detail_tree = if is_root {
-                String::new()
-            } else {
-                let parent_continuation = if is_last { "    " } else { "│   " };
-
-                let child_compact = depth + 1 >= MAX_TREE_DEPTH;
-                let neigbour_copact: bool = is_compact && !is_last;
-                if neigbour_copact || child_compact {
-                    // child is compact - add prefix
-                    let child_prefix = if depth < MAX_TREE_DEPTH { "    " } else { "" };
-                    let num_parents = key.matches('/').count();
-                    // child is compact add prefix
-                    format!(
-                        "{} {} <=={}({})",
-                        prefix, child_prefix, num_parents, node_display_name
-                    )
-                } else if node.children.is_empty() {
-                    let own_continuation = "    ";
-                    format!("{}{}{}", prefix, parent_continuation, own_continuation)
-                } else {
-                    let own_continuation = "│   ";
-                    format!("{}{}{}", prefix, parent_continuation, own_continuation)
-                }
-            };
+            let detail_tree = String::new();
             print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
             for (metric_idx, s) in stats.iter().enumerate() {
                 let range = self.format_compact_range(metric_idx, s.min, s.max);
@@ -487,23 +515,8 @@ impl<M: Metrics> Report<M> {
             println!();
         }
 
-        let next_prefix = if is_root {
-            String::new()
-        } else if is_compact {
-            prefix.to_string()
-        } else {
-            format!("{}{}", prefix, if is_last { "    " } else { "│   " })
-        };
-
-        for (idx, child_key) in node.children.iter().enumerate() {
-            self.print_node(
-                child_key,
-                &next_prefix,
-                idx + 1 == node.children.len(),
-                false,
-                depth + 1,
-                layout,
-            );
+        for child_key in &node.children {
+            self.print_node(child_key, layout);
         }
     }
 
