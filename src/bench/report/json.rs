@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::MetricStats;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ReportSnapshot {
     pub schema_version: u32,
     pub group: Option<String>,
@@ -16,7 +16,7 @@ pub struct ReportSnapshot {
     pub events: Vec<(usize, Vec<f64>)>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct JsonSpanNode {
     pub name: String,
     pub samples: usize,
@@ -24,7 +24,7 @@ pub struct JsonSpanNode {
     pub children: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct JsonReport {
     pub group: Option<String>,
     pub name: String,
@@ -108,4 +108,9 @@ pub fn write_aggregated_json<M: crate::Metrics>(
 
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, &json_report).map_err(io::Error::other)
+}
+
+pub fn read_aggregated_json(path: &std::path::Path) -> io::Result<JsonReport> {
+    let file = File::open(path)?;
+    serde_json::from_reader(file).map_err(io::Error::other)
 }

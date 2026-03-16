@@ -5,7 +5,7 @@ use std::time::Duration;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
-use self::report::{AnalyzedReport, ReportPrinter};
+use self::report::{AnalyzedReport, ReportPrinter, json::JsonReport};
 use crate::{Collector, Metrics};
 
 mod default_metrics;
@@ -35,6 +35,12 @@ impl IterScope {
             }
             IterScope::Invalid => panic!("Invalid IterScope state"),
         }
+    }
+}
+
+impl From<tracing::Span> for IterScope {
+    fn from(span: Span) -> Self {
+        IterScope::NonEntered(span)
     }
 }
 
@@ -97,7 +103,39 @@ impl Bencher {
     }
 
     /// Defines run fn of a benchmark.
+    /// By default, it will drop result of bench function outside of measured span.
+    ///
+    /// Note: If multiple benchmarks is defined within single `Bencher`,
+    /// they should change name of benchmark with `name()` fn.
+    ///
+    /// Panics: if multiple calls to `run()` have the same name.
     pub fn run<R>(&mut self, mut f: impl FnMut() -> R + 'static + Send) {
+        self.run_custom(move |mut scope| {
+            scope.finish_setup();
+            let res = f();
+            drop(scope);
+            drop(res);
+        });
+    }
+
+    /// Defines run fn of a benchmark with access to scope api.
+    /// This allows benchmark function to remove setup or drop function from measurement.
+    ///
+    /// Example usage:
+    /// ```
+    /// bencher.run_custom(|scope| {/* setup code */ scope.finish_setup(); /* measured code */ drop(scope) })
+    /// ```
+    ///
+    /// For example, if you measure some sorting function:
+    /// ```
+    /// bencher.run_custom(|scope| {
+    ///     let mut data = generate_random_data();
+    ///     scope.finish_setup();
+    ///     sort(&mut data);
+    ///     drop(scope); //optionally drop scope to avoid measuring of drop time of `data`
+    /// })
+    /// ```
+    pub fn run_custom(&mut self, func: impl FnMut(IterScope) + 'static + Send) {
         assert_ne!(
             self.iter_fn.last().map(|v| v.name.as_str()),
             Some(self.name.as_str()),
@@ -106,12 +144,10 @@ impl Bencher {
         self.iter_fn.push(NamedBench {
             name: self.name.clone(),
             config: self.current_config.clone(),
-            func: Box::new(move |span| {
-                let _g = span.enter();
-                let _ = f();
-            }),
+            func: Box::new(func),
         });
     }
+    /// Convert registered benchmarks into `Vec<NamedBench>` suitable for running with `BenchRunner::register()`.
     pub fn take_benches(&mut self) -> Vec<NamedBench> {
         std::mem::take(&mut self.iter_fn)
     }
@@ -119,7 +155,7 @@ impl Bencher {
 pub struct NamedBench {
     name: String,
     config: BenchConfig,
-    func: Box<dyn FnMut(Span) + Send>,
+    func: Box<dyn FnMut(IterScope) + Send>,
 }
 impl Debug for NamedBench {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -172,7 +208,7 @@ where
         self.benchmarks
             .sort_by(|a, b| (&a.config.group_name, &a.name).cmp(&(&b.config.group_name, &b.name)));
 
-        let mut reports: Vec<AnalyzedReport<M>> = Vec::new();
+        let mut reports: Vec<(AnalyzedReport<M>, Option<JsonReport>)> = Vec::new();
 
         for NamedBench { name, func, config } in &mut self.benchmarks {
             // Phase 1: Warmup — collector NOT installed as subscriber.
@@ -180,7 +216,7 @@ where
             let _guard = tracing::subscriber::set_default(subscriber);
             for _ in 0..config.warmup_seconds {
                 func(black_box(
-                    tracing::info_span!(target: "profiler", "bench", name = name),
+                    tracing::info_span!(target: "profiler", "bench", name = name).into(),
                 ));
             }
             let _ = self.collector.drain();
@@ -188,9 +224,9 @@ where
             // Phase 2: Measured — install collector for the measurement window.
             {
                 let start = std::time::Instant::now();
-                for iter in 0.. {
+                for iter in 1.. {
                     func(black_box(
-                        tracing::info_span!(target: "profiler", "bench", name = name),
+                        tracing::info_span!(target: "profiler", "bench", name = name).into(),
                     ));
                     if iter >= config.num_iters && start.elapsed() >= config.min_run_time {
                         break;
@@ -206,13 +242,25 @@ where
                 config.group_name.clone(),
                 name.clone(),
             );
+
+            let baseline = report.read_aggregated_json_from_default_path().ok();
+
             if let Err(error) = report.write_snapshot_to_default_path() {
                 eprintln!("Failed to save baseline JSON for {}: {}", name, error);
             }
-            reports.push(report);
+            reports.push((report, baseline));
         }
 
         ReportPrinter::print_all(&reports);
+
+        for (report, _) in &reports {
+            if let Err(error) = report.write_aggregated_json_to_default_path() {
+                eprintln!(
+                    "Failed to save aggregated JSON for {}: {}",
+                    report.data.bench_name, error
+                );
+            }
+        }
     }
 }
 

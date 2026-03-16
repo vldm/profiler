@@ -4,9 +4,9 @@
 // - Custom fn(&mut Bencher) benchmarks with groups
 // - tracing instrumentation inside benchmarked code
 //
-// Run with: cargo run --example basic
+// Run with: cargo run --example demo
 
-use std::time::Duration;
+use std::{thread::sleep, time::Duration};
 
 use profiler::bench::Bencher;
 
@@ -33,25 +33,18 @@ fn parse_by_bytes(data: &[u8]) -> Vec<u32> {
     result
 }
 
-fn other_fn() {
-    let _span = tracing::info_span!("other_fn").entered();
-}
-
 #[tracing::instrument(skip_all)]
 fn subprocess(items: &[u32], recursion: u64) -> u64 {
     if recursion == 0 {
         return items.iter().map(|&x| x as u64).sum();
     }
-    if recursion % 2 == 0 {
-        // call additional fn to create more spans for test
-        other_fn();
-    }
     subprocess(&items, recursion - 1)
 }
 
 fn process(items: Vec<u32>) -> u64 {
+    sleep(Duration::from_millis(100));
     let _span = tracing::info_span!("process").entered();
-    subprocess(&items, 5)
+    subprocess(&items, 3)
 }
 
 #[tracing::instrument(skip_all)]
@@ -60,6 +53,7 @@ fn serialize(result: u64) -> Vec<u8> {
 }
 
 fn pipeline(data: &[u8]) -> Vec<u8> {
+    sleep(Duration::from_millis(100));
     serialize(process(parse(data)))
 }
 
@@ -75,10 +69,7 @@ fn bench_pipeline() {
 fn bench_parse(bencher: &mut Bencher) {
     let data: Vec<u8> = (0..1024u16).flat_map(|x| x.to_le_bytes()).collect();
 
-    let group = bencher
-        .group("parsing")
-        .num_iters(1)
-        .min_run_time(Duration::from_nanos(1));
+    let group = bencher.group("parsing");
 
     let data_clone = data.clone();
     group.name("chunks").run(move || {

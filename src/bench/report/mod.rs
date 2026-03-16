@@ -6,14 +6,25 @@ use std::{
     sync::Arc,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::Id;
 
 use crate::{Metrics, ProfileEntry};
 
 /// One node in the aggregated span tree, keyed by (name, parent_key).
 pub mod json;
-
+pub enum JsonFile {
+    Snapshot,
+    Aggregated,
+}
+impl JsonFile {
+    pub fn filename(&self) -> &'static str {
+        match self {
+            JsonFile::Snapshot => "events.json",
+            JsonFile::Aggregated => "run.json",
+        }
+    }
+}
 pub struct SpanNode {
     pub name: String,
     /// `samples[i][j]` = value of metric `j` in sample `i`.
@@ -22,7 +33,7 @@ pub struct SpanNode {
 }
 
 /// Statistics for one metric across samples.
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct MetricStats {
     pub mean: f64,
     pub stddev: f64,
@@ -247,7 +258,11 @@ impl<M: Metrics> AnalyzedReport<M> {
         }
     }
 
-    fn default_base_path(group_name: &Option<String>, bench_name: &String) -> PathBuf {
+    fn format_path(
+        group_name: &Option<String>,
+        bench_name: &String,
+        json_file: JsonFile,
+    ) -> PathBuf {
         let mut path = cargo_target_directory()
             .unwrap_or_else(|| PathBuf::from("target"))
             .join("profiler");
@@ -255,12 +270,15 @@ impl<M: Metrics> AnalyzedReport<M> {
             path = path.join(sanitize_path_segment(group));
         }
         path = path.join(sanitize_path_segment(bench_name));
-        path
+        path.join(json_file.filename())
     }
 
     pub fn write_snapshot_to_default_path(&self) -> io::Result<PathBuf> {
-        let mut path = Self::default_base_path(&self.data.group_name, &self.data.bench_name);
-        path = path.join("events.json");
+        let path = Self::format_path(
+            &self.data.group_name,
+            &self.data.bench_name,
+            JsonFile::Snapshot,
+        );
         self.write_snapshot(&path)?;
         Ok(path)
     }
@@ -270,8 +288,11 @@ impl<M: Metrics> AnalyzedReport<M> {
     }
 
     pub fn write_aggregated_json_to_default_path(&self) -> io::Result<PathBuf> {
-        let mut path = Self::default_base_path(&self.data.group_name, &self.data.bench_name);
-        path = path.join("run.json");
+        let path = Self::format_path(
+            &self.data.group_name,
+            &self.data.bench_name,
+            JsonFile::Aggregated,
+        );
         self.write_aggregated_json(&path)?;
         Ok(path)
     }
@@ -279,10 +300,20 @@ impl<M: Metrics> AnalyzedReport<M> {
     pub fn write_aggregated_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
         json::write_aggregated_json(self, path.as_ref())
     }
+
+    pub fn read_aggregated_json_from_default_path(&self) -> io::Result<json::JsonReport> {
+        let path = Self::format_path(
+            &self.data.group_name,
+            &self.data.bench_name,
+            JsonFile::Aggregated,
+        );
+        json::read_aggregated_json(&path)
+    }
 }
 
 pub struct ReportPrinter<'a, M: Metrics> {
     pub report: &'a AnalyzedReport<M>,
+    pub baseline: Option<&'a json::JsonReport>,
 }
 
 impl<'a, M: Metrics> ReportPrinter<'a, M> {
@@ -322,11 +353,11 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
 
     /// Print a collection of reports grouped, with group headers and separators.
     /// All output lives here — callers just pass in the reports.
-    pub fn print_all(reports: &[AnalyzedReport<M>]) {
+    pub fn print_all(reports: &[(AnalyzedReport<M>, Option<json::JsonReport>)]) {
         if reports.is_empty() {
             return;
         }
-        let n_metrics = reports[0].metric_names.len();
+        let n_metrics = reports[0].0.metric_names.len();
         let w = table_width(n_metrics);
         // let thick = "─".repeat(w);
         let thin = "- ".repeat(w / 2).trim_end().to_string();
@@ -334,7 +365,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         let mut current_group: Option<&Option<String>> = None;
         let mut bench_index_in_group: usize = 0;
 
-        for report in reports {
+        for (report, baseline) in reports {
             let group = &report.data.group_name;
             if current_group != Some(group) {
                 if let Some(g) = group {
@@ -347,7 +378,10 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             } else if bench_index_in_group > 0 {
                 println!("{}", thin);
             }
-            let printer = ReportPrinter { report };
+            let printer = ReportPrinter {
+                report,
+                baseline: baseline.as_ref(),
+            };
             printer.print();
             bench_index_in_group += 1;
         }
@@ -444,36 +478,117 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             label = format!("{}...", trunc);
         }
 
-        // Row 1: name(count) and mean ± spread%
+        let baseline_stats = self
+            .baseline
+            .and_then(|b| b.nodes.get(key).map(|n| &n.stats));
+
+        // Row 1: name(count) and median ± spread%
         print!(
             "\x1b[1m{:<label_w$}\x1b[0m",
             label,
             label_w = layout.label_w
         );
         for (metric_idx, s) in stats.iter().enumerate() {
-            let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.mean);
-            let spread_pct = s.spread() * 100.0;
-            let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
-            print!(
-                "\x1b[1m{:gap$}{:>w$}\x1b[0m",
-                "",
-                cell,
-                gap = layout.col_gap,
-                w = layout.col_w
-            );
+            if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
+                let (val, unit) = self.report.data.metrics.format_value(metric_idx, b.median);
+                let spread_pct = b.spread() * 100.0;
+                let cell = format!("b: {}{} ± {:.0}%", val, unit, spread_pct);
+                print!(
+                    "\x1b[1m{:gap$}{:>w$}\x1b[0m",
+                    "",
+                    cell,
+                    gap = layout.col_gap,
+                    w = layout.col_w
+                );
+            } else {
+                let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
+                let spread_pct = s.spread() * 100.0;
+                let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
+                print!(
+                    "\x1b[1m{:gap$}{:>w$}\x1b[0m",
+                    "",
+                    cell,
+                    gap = layout.col_gap,
+                    w = layout.col_w
+                );
+            }
         }
         println!();
 
-        // Row 2: compact [min..max]
+        // Row 2: Either difference to baseline or skip
+        if baseline_stats.is_some() {
+            let detail_tree = String::new();
+            print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
+            for (metric_idx, s) in stats.iter().enumerate() {
+                if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
+                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
+                    let spread_pct = s.spread() * 100.0;
+
+                    let diff_pct = if b.median.abs() > f64::EPSILON {
+                        (s.median - b.median) / b.median * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let color = if diff_pct < -1.5 {
+                        "\x1b[32m"
+                    } else if diff_pct > 1.5 {
+                        "\x1b[31m"
+                    } else {
+                        ""
+                    };
+                    let reset = if color.is_empty() { "" } else { "\x1b[0m" };
+                    let diff_str = if diff_pct > 0.0 {
+                        format!("+{:.2}%", diff_pct)
+                    } else {
+                        format!("{:.2}%", diff_pct)
+                    };
+
+                    let raw_cell = format!("{}{} ± {:.0}% ({})", val, unit, spread_pct, diff_str);
+                    let colored_cell = format!(
+                        "{}{} ± {:.0}% ({}{}{})",
+                        val, unit, spread_pct, color, diff_str, reset
+                    );
+
+                    let cell_len = raw_cell.chars().count();
+                    let padding = layout.col_w.saturating_sub(cell_len);
+                    print!(
+                        "{:gap$}{:pad$}{}",
+                        "",
+                        "",
+                        colored_cell,
+                        gap = layout.col_gap,
+                        pad = padding
+                    );
+                } else {
+                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
+                    let spread_pct = s.spread() * 100.0;
+                    let raw_cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
+                    let cell_len = raw_cell.chars().count();
+                    let padding = layout.col_w.saturating_sub(cell_len);
+                    print!(
+                        "{:gap$}{:pad$}{}",
+                        "",
+                        "",
+                        raw_cell,
+                        gap = layout.col_gap,
+                        pad = padding
+                    );
+                }
+            }
+            println!();
+        }
+
+        // Row 3 (or 2 if no baseline): compact [min..max]
         {
             let detail_tree = String::new();
             print!("{:<label_w$}", detail_tree, label_w = layout.label_w);
             for (metric_idx, s) in stats.iter().enumerate() {
                 let range = self.format_compact_range(metric_idx, s.min, s.max);
                 let cell = format!("\x1b[2m{}\x1b[0m", range);
-                let padding = layout.col_w.saturating_sub(range.len());
+                let padding = layout.col_w.saturating_sub(range.chars().count());
                 print!(
-                    "{:gap$}{:>pad$}{}",
+                    "{:gap$}{:pad$}{}",
                     "",
                     "",
                     cell,
