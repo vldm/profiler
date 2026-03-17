@@ -8,7 +8,7 @@
 //! 3. main fn implementation
 //!
 //! Usage:
-//! cargo run --release -p typed_fibonacci
+//! cargo bench --bench typed_fibonacci
 //!
 use profiler::bench::MetricsProvider;
 use profiler::bench::{BenchRunner, Bencher};

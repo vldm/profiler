@@ -6,7 +6,7 @@
 //! 2. Call it as regular benchmark
 //!
 //! Usage:
-//! cargo run --release -p tracing
+//! cargo bench --bench tracing
 
 use profiler::bench_main;
 

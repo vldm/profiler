@@ -6,7 +6,7 @@
 //! 2. wrap it to main fn suitable for cargo bench
 //!
 //! Usage:
-//! cargo run --release -p easy
+//! cargo bench --bench easy
 
 fn test_data() -> Vec<u8> {
     [5, 3, 8, 1, 2].repeat(10)
