@@ -4,7 +4,7 @@ use profiler_macros::Metrics;
 pub struct MetricsProvider {
     /// CPU cycles spent in the span.
     /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
-    #[new(perf_event::events::Hardware::REF_CPU_CYCLES)]
+    #[new(perf_event::events::Hardware::CPU_CYCLES)]
     pub cycles: crate::PerfEventMetric,
 
     /// Time spent on CPU for specific thread.

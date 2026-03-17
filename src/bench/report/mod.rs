@@ -129,7 +129,7 @@ pub trait AnalysisProgress {
 
 const PRIMARY_METRIC_IDX: usize = 0;
 const LABEL_W: usize = 34;
-const COL_W: usize = 20;
+const COL_W: usize = 24;
 const COL_GAP: usize = 5;
 
 /// Width of the full table for `n_metrics` columns. Use this when printing
