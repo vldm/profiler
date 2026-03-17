@@ -25,6 +25,7 @@ impl JsonFile {
         }
     }
 }
+#[derive(Debug)]
 pub struct SpanNode {
     pub name: String,
     /// `samples[i][j]` = value of metric `j` in sample `i`.
@@ -175,30 +176,11 @@ impl<M: Metrics> AnalyzedReport<M> {
         M::Result: Debug,
         M::Start: Debug,
     {
-        fn compute_key(
-            id: &Id,
-            span_info: &HashMap<Id, (&'static str, Option<Id>)>,
-        ) -> Vec<&'static str> {
-            let (name, parent) = match span_info.get(id) {
-                Some(v) => v,
-                None => return vec!["?"],
-            };
-            match parent {
-                Some(pid) => {
-                    let parent_key = compute_key(pid, span_info);
-                    let mut key = parent_key;
-                    key.push(name);
-                    key
-                }
-                None => vec![*name],
-            }
-        }
-
         // Collect results for each span, underway converting from span id to path.
         let mut published = Vec::new();
 
         // list of spans currently "in flight"
-        let mut span_frame: HashMap<Id, (&'static str, Option<Id>)> = HashMap::new();
+        let mut span_frame: HashMap<Id, Vec<&'static str>> = HashMap::new();
         publish_progress(
             &mut progress,
             AnalysisPhase::FillPublished,
@@ -214,22 +196,23 @@ impl<M: Metrics> AnalyzedReport<M> {
                     parent,
                     ..
                 } => {
-                    span_frame.insert(
-                        id.clone(),
-                        (
-                            metadata.map(|meta| meta.name()).unwrap_or("unknown"),
-                            parent.clone(),
-                        ),
-                    );
+                    let mut parent_key = parent
+                        .as_ref()
+                        .map(|p| span_frame.get(p).cloned().unwrap_or_else(|| vec!["?"]))
+                        .unwrap_or_default();
+                    parent_key.push(metadata.map(|meta| meta.name()).unwrap_or("unknown"));
+
+                    span_frame.insert(id.clone(), parent_key);
                 }
                 // Phase 2: for each Id compute its aggregation key (name path).
                 // Cache to avoid repeated traversal.
                 ProfileEntry::Publish { id, result } => {
-                    let path = compute_key(id, &span_frame);
+                    let path = span_frame.get(id).cloned().unwrap_or_else(|| vec!["?"]);
+
                     let owned_path: Vec<String> = path.into_iter().map(|s| s.to_string()).collect();
                     published.push((owned_path, result.clone()));
-                    // it will be replaced anyway so we can free it early
-                    span_frame.remove(id);
+                    // other span can be created buy not entered before parent is exited, so we can't remove it.
+                    // span_frame.remove(id);
                 }
             }
             publish_progress(
@@ -308,6 +291,7 @@ impl<M: Metrics> AnalyzedReport<M> {
                 published.len(),
             );
         }
+        roots.push("?".to_string()); // add "unknown" root for spans without Register entry
 
         let node_keys: Vec<String> = nodes.keys().cloned().collect();
         let finalize_total = node_keys.len() + 2;
@@ -519,8 +503,12 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
 
     fn format_flat_path(&self, key: &str, max_len: usize) -> String {
         let mut parts: Vec<&str> = key.split('/').collect();
-        if !parts.is_empty() {
-            parts[0] = &self.report.data.bench_name;
+
+        match parts.len() {
+            1.. if parts[0] == "?" => {} // skip
+            1 => parts[0] = &self.report.data.bench_name,
+            2.. => parts[0] = "",
+            _ => {}
         }
 
         let n = parts.len();
@@ -589,6 +577,9 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         };
 
         if node.samples.is_empty() {
+            for child_key in &node.children {
+                self.print_node(child_key, layout);
+            }
             return;
         }
 
@@ -601,7 +592,6 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
 
         let path_str = self.format_flat_path(key, max_path_len);
         let mut label = format!("{}{}", path_str, suffix);
-
         // Ensure the label does not exceed label_w (should be guaranteed by format_flat_path, but safety first)
         if label.chars().count() > layout.label_w {
             let trunc: String = label.chars().take(layout.label_w - 3).collect();

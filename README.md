@@ -114,3 +114,5 @@ Checkout [benches](benches) for more examples, and [docs](https://docs.rs/profil
 - [ ] Implement "calculated" metrics, that can be calculated from other metrics (e.g. cpu-off-time = wall-time - task-time);
 - [ ] Add example of using custom metrics;
 - [ ] Implement collector that sends metrics with `tracing_subscriber` or `metrics` or channel to some external system, to use it in production;
+- [ ] CI integration;
+- [ ] profiler UI integration/implementation;
