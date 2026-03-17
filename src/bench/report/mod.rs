@@ -365,10 +365,16 @@ impl<M: Metrics> AnalyzedReport<M> {
         }
     }
 
-    fn format_path(group_name: &Option<String>, bench_name: &str, json_file: JsonFile) -> PathBuf {
+    fn format_path(
+        filename: &str,
+        group_name: &Option<String>,
+        bench_name: &str,
+        json_file: JsonFile,
+    ) -> PathBuf {
         let mut path = cargo_target_directory()
             .unwrap_or_else(|| PathBuf::from("target"))
-            .join("profiler");
+            .join("profiler")
+            .join(sanitize_path_segment(filename));
         if let Some(group) = &group_name {
             path = path.join(sanitize_path_segment(group));
         }
@@ -376,8 +382,9 @@ impl<M: Metrics> AnalyzedReport<M> {
         path.join(json_file.filename())
     }
 
-    pub fn write_snapshot_to_default_path(&self) -> io::Result<PathBuf> {
+    pub fn write_snapshot_to_default_path(&self, filename: &str) -> io::Result<PathBuf> {
         let path = Self::format_path(
+            filename,
             &self.data.group_name,
             &self.data.bench_name,
             JsonFile::Snapshot,
@@ -390,8 +397,9 @@ impl<M: Metrics> AnalyzedReport<M> {
         json::write_snapshot(self, path.as_ref())
     }
 
-    pub fn write_aggregated_json_to_default_path(&self) -> io::Result<PathBuf> {
+    pub fn write_aggregated_json_to_default_path(&self, filename: &str) -> io::Result<PathBuf> {
         let path = Self::format_path(
+            filename,
             &self.data.group_name,
             &self.data.bench_name,
             JsonFile::Aggregated,
@@ -404,8 +412,12 @@ impl<M: Metrics> AnalyzedReport<M> {
         json::write_aggregated_json(self, path.as_ref())
     }
 
-    pub fn read_aggregated_json_from_default_path(&self) -> io::Result<json::JsonReport> {
+    pub fn read_aggregated_json_from_default_path(
+        &self,
+        filename: &str,
+    ) -> io::Result<json::JsonReport> {
         let path = Self::format_path(
+            filename,
             &self.data.group_name,
             &self.data.bench_name,
             JsonFile::Aggregated,

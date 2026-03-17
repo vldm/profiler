@@ -21,6 +21,7 @@ pub use self::helpers::{BenchFn, BenchFnSpec};
 pub use std::hint::black_box;
 
 /// Helper handler that allows separating `setup` and `measured` phases of a benchmark.
+#[must_use = "without calling finish_setup - benchmark will not measure"]
 pub enum IterScope {
     NonEntered(Span),
     SetupFinished(EnteredSpan),
@@ -461,6 +462,7 @@ impl Debug for NamedBench {
 /// the tracing subscriber only during the measured phase (not during warmup).
 pub struct BenchRunner<M: Metrics + Default = MetricsProvider> {
     collector: Collector<M>,
+    filename: String,
     benchmarks: Vec<NamedBench>,
 }
 
@@ -469,10 +471,14 @@ where
     M::Result: Debug,
     M::Start: Debug,
 {
-    pub fn new() -> Self {
+    /// Create new `BenchRunner` for specific file.
+    ///
+    /// The filename will be used as path in report saving functionality.
+    pub fn new(filename: impl Into<String>) -> Self {
         let collector = Collector::new_buffered(Arc::new(M::default()));
         Self {
             collector,
+            filename: filename.into(),
             benchmarks: Vec::new(),
         }
     }
@@ -567,12 +573,14 @@ where
                 )
             });
             let baseline = progress.with_phase_spinner("Load baseline", || {
-                report.read_aggregated_json_from_default_path().ok()
+                report
+                    .read_aggregated_json_from_default_path(&self.filename)
+                    .ok()
             });
 
-            if let Err(error) = progress
-                .with_phase_spinner("Write snapshot", || report.write_snapshot_to_default_path())
-            {
+            if let Err(error) = progress.with_phase_spinner("Write snapshot", || {
+                report.write_snapshot_to_default_path(&self.filename)
+            }) {
                 eprintln!("Failed to save baseline JSON for {}: {}", name, error);
             }
             reports.push((report, baseline));
@@ -581,7 +589,7 @@ where
         ReportPrinter::print_all(&reports);
 
         for (report, _) in &reports {
-            if let Err(error) = report.write_aggregated_json_to_default_path() {
+            if let Err(error) = report.write_aggregated_json_to_default_path(&self.filename) {
                 eprintln!(
                     "Failed to save aggregated JSON for {}: {}",
                     report.data.bench_name, error
@@ -591,8 +599,26 @@ where
     }
 }
 
+/// Generate main function body for benchmark.
+#[macro_export]
+macro_rules! bench_main {
+    ($metrics:ty => $($bench: ident),+) => {
+        fn main() {
+            use $crate::bench::*;
+            let mut runner = BenchRunner::<$metrics>::new(file!());
+            $(
+                runner.register( (&mut &mut  BenchFn::new($bench)).register_with_name(stringify!($bench)));
+            )+
+            runner.start();
+        }
+    };
+    ($($bench: ident),+) => {
+        $crate::bench_main!(profiler::bench::MetricsProvider => $($bench),+);
+    }
+}
+
 #[cfg(feature = "libc")]
-pub fn pin_current_thread() -> std::io::Result<()> {
+fn pin_current_thread() -> std::io::Result<()> {
     unsafe {
         let cpus = num_cpus::get();
         let cpu = (cpus + 2) % cpus; // third cpu if there are more than 2, otherwise the same cpu
@@ -606,16 +632,6 @@ pub fn pin_current_thread() -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-impl<M: Metrics + Default> Default for BenchRunner<M>
-where
-    M::Result: Debug,
-    M::Start: Debug,
-{
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(test)]

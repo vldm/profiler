@@ -8,6 +8,8 @@ pub use crate::metrics::{
     InstantProvider, Metrics, PerfEventMetric, RusageKind, RusageMetric, SingleMetric,
     format_unit_helper,
 };
+pub use profiler_macros::Metrics;
+
 pub use std::hint::black_box;
 pub mod bench;
 pub mod metrics;

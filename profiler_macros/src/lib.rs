@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta};
 
-#[proc_macro_derive(Metrics, attributes(new))]
+#[proc_macro_derive(Metrics, attributes(new, register, crate_path))]
 pub fn derive_metrics(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -15,6 +15,26 @@ pub fn derive_metrics(input: TokenStream) -> TokenStream {
     let Fields::Named(fields) = &data_struct.fields else {
         panic!("Metrics can only be derived for structs with named fields");
     };
+
+    let need_register = input
+        .attrs
+        .iter()
+        .find(|a| a.path().is_ident("register"))
+        .is_some();
+    let crate_path = input
+        .attrs
+        .iter()
+        .find(|a| a.path().is_ident("crate_path"))
+        .map(|a| {
+            {
+                a.meta
+                    .require_list()
+                    .expect("Expected a list of tokens for crate_path")
+                    .tokens
+                    .clone()
+            }
+        })
+        .unwrap_or_else(|| quote! { profiler });
 
     let mut default_fields = Vec::new();
     let mut starts = Vec::new();
@@ -49,8 +69,8 @@ pub fn derive_metrics(input: TokenStream) -> TokenStream {
             });
         }
 
-        starts.push(quote! { <#field_type as crate::SingleMetric>::Start });
-        results.push(quote! { <#field_type as crate::SingleMetric>::Result });
+        starts.push(quote! { <#field_type as #crate_path::SingleMetric>::Start });
+        results.push(quote! { <#field_type as #crate_path::SingleMetric>::Result });
 
         start_calls.push(quote! { self.#field_name.start() });
 
@@ -75,6 +95,27 @@ pub fn derive_metrics(input: TokenStream) -> TokenStream {
         proc_macro2::Span::call_site(),
     );
 
+    let register = if need_register {
+        quote! {
+            type MetricsProvider = #name;
+            const _ASSERT_MAIN_GENERATED: () =
+                {PROFILER_MAIN_GENERATED}; // const from bench_main
+            // Mb compare name of function
+            // const _ASSERT_IN_MAIN: () = {
+            //     let caller = {
+            //         fn f() {}
+            //         let name = core::any::type_name_of_val(&f);
+            //         &name[..name.len() - 3]
+            //     };
+            //     if caller.as_bytes() != b"main" {
+            //         panic!("Metrics can only be registered in the main function");
+            //     }
+            // };
+        }
+    } else {
+        quote!()
+    };
+
     let expanded = quote! {
         impl ::core::default::Default for #name {
             fn default() -> Self {
@@ -84,22 +125,24 @@ pub fn derive_metrics(input: TokenStream) -> TokenStream {
             }
         }
 
-        const #assert_name: () = {
-            const fn assert_send_sync<T: Send + Sync + 'static>() {}
-            assert_send_sync::<#name>();
-        };
+        impl #name {
+           const #assert_name: () = {
+                const fn assert_send_sync<T: Send + Sync + 'static>() {}
+                assert_send_sync::<#name>();
+            };
+        }
 
-        impl crate::Metrics for #name {
+        impl #crate_path::Metrics for #name {
             type Start = (#(#starts,)*);
             type Result = (#(#results,)*);
 
             fn start(&self) -> Self::Start {
-                use crate::SingleMetric;
+                use #crate_path::SingleMetric;
                 (#(#start_calls,)*)
             }
 
             fn end(&self, start: Self::Start) -> Self::Result {
-                use crate::SingleMetric;
+                use #crate_path::SingleMetric;
                 #(#end_calls)*
                 (#(#result_tuple_fields,)*)
             }
@@ -109,21 +152,23 @@ pub fn derive_metrics(input: TokenStream) -> TokenStream {
             }
 
             fn format_value(&self, metric_idx: usize, value: f64) -> (String, &'static str) {
-                use crate::SingleMetric;
+                use #crate_path::SingleMetric;
                 match metric_idx {
                     #(#format_match_arms,)*
-                    _ => crate::format_unit_helper(value),
+                    _ => #crate_path::format_unit_helper(value),
                 }
             }
 
             fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64 {
-                use crate::SingleMetric;
+                use #crate_path::SingleMetric;
                 match metric_idx {
                     #(#result_to_f64_match_arms,)*
                     _ => panic!("Invalid metric index"),
                 }
             }
         }
+
+        #register
     };
 
     TokenStream::from(expanded)

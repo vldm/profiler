@@ -1,6 +1,7 @@
 use profiler_macros::Metrics;
 
 #[derive(Metrics)]
+#[crate_path(crate)]
 pub struct MetricsProvider {
     /// CPU cycles spent in the span.
     /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
