@@ -19,6 +19,10 @@ impl<T> BenchFn<T> {
         self.0.take().expect("bench fn to exist")
     }
 }
+
+/// Helper trait to use different signatures of benchmark functions inside [`bench_main!`] macro.
+///
+/// See more details in [`BenchFn`] documentation.
 pub trait BenchFnSpec {
     fn register_with_name(&mut self, name: &'static str) -> Vec<NamedBench>;
 }

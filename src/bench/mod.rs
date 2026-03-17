@@ -1,3 +1,7 @@
+//!
+//! 
+//! 
+//! 
 use std::fmt::Debug;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +25,19 @@ pub use self::helpers::{BenchFn, BenchFnSpec};
 pub use std::hint::black_box;
 
 /// Helper handler that allows separating `setup` and `measured` phases of a benchmark.
+///
+/// ## Example usage:
+/// ```
+/// use profiler::bench::IterScope;
+///
+/// fn example_bench(mut scope: IterScope) {
+///   // setup code
+///   scope.finish_setup();
+///   // measured code
+/// }
+///
+/// profiler::bench_main!(example_bench);
+/// ```
 #[must_use = "without calling finish_setup - benchmark will not measure"]
 pub enum IterScope {
     NonEntered(Span),
@@ -50,7 +67,7 @@ impl From<tracing::Span> for IterScope {
 }
 
 #[derive(Clone, Debug)]
-pub struct BenchConfig {
+struct BenchConfig {
     warmup_seconds: usize,
     num_iters: usize,
     min_run_time: Duration,
@@ -128,7 +145,7 @@ impl Bencher {
     /// Defines run fn of a benchmark with access to scope api.
     /// This allows benchmark function to remove setup or drop function from measurement.
     ///
-    /// Example usage:
+    /// # Example usage:
     /// ```
     /// use profiler::bench::Bencher;
     ///
@@ -141,7 +158,7 @@ impl Bencher {
     /// });
     /// ```
     ///
-    /// For example, if you measure some sorting function:
+    /// # For example, if you measure some sorting function:
     /// ```
     /// use profiler::bench::Bencher;
     ///
@@ -442,6 +459,8 @@ fn progress_bar(progress: f64, width: usize) -> String {
     format!("{}{}", "=".repeat(filled), " ".repeat(width - filled))
 }
 
+/// Low level declaration of benchmark.
+/// Contains benchmark function, name and config for benchmark execution.
 pub struct NamedBench {
     name: String,
     config: BenchConfig,
@@ -599,7 +618,34 @@ where
     }
 }
 
-/// Generate main function body for benchmark.
+///
+/// Generate main function for benchmark.
+///
+/// # Usage:
+/// ```
+/// fn bench_sort() {
+///    // benchmark code
+/// }
+///
+/// profiler::bench_main!(bench_sort);
+/// ```
+///
+/// This will expand in something simiar to:
+/// ```
+/// fn main() {
+///   use profiler::bench::*;
+///   let mut runner = BenchRunner::<MetricsProvider>::new(file!());   
+///   runner.register( (&mut &mut  BenchFn::new(bench_sort)).register_with_name("bench_sort"));     
+///   runner.start();
+/// }
+/// ```
+///
+/// where `&mut &mut  BenchFn::new` part is auto-deref specialized code,
+///  read more in [`BenchFn`] and [`BenchFnSpec`] documentation.
+///
+/// `MetricsProvider` is default set of metrics, but user can provide their own by using
+/// `bench_main!(MyMetricsProvider => bench_sort)`.
+///
 #[macro_export]
 macro_rules! bench_main {
     ($metrics:ty => $($bench: ident),+) => {

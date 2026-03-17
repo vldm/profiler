@@ -10,7 +10,7 @@ use std::{hint::black_box, time::Duration};
 
 use profiler::Metrics;
 
-/// Defines custom metrics for the benchmark.
+// /// Defines custom metrics for the benchmark.
 #[derive(Metrics)]
 struct MyMetrics {
     /// CPU cycles spent in the span.

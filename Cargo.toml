@@ -19,9 +19,25 @@ serde_json = "1"
 libc = { version = "0.2.183", optional = true }
 num_cpus = { version = "1.13.1", optional = true }
 
-profiler_macros = { version = "0.1.0", path = "profiler_macros" }
+profiler_macros = { version = "0.1.1", path = "profiler_macros" }
 
 
 [features]
 default = ["libc"]
 libc = ["dep:libc", "dep:num_cpus"]
+
+[[bench]]
+name = "easy"
+harness = false
+
+[[bench]]
+name = "tracing"
+harness = false
+
+[[bench]]
+name = "macro_extended"
+harness = false
+
+[[bench]]
+name = "typed_fibonacci"
+harness = false

@@ -1,5 +1,8 @@
 use profiler_macros::Metrics;
 
+///
+/// Default set of metrics used in benchmarks, if no custom set is provided.
+///
 #[derive(Metrics)]
 #[crate_path(crate)]
 pub struct MetricsProvider {

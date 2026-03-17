@@ -48,5 +48,4 @@ fn bench_pipeline() {
     pipeline(&data);
 }
 
-
 bench_main!(bench_pipeline);

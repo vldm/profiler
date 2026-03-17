@@ -1,3 +1,49 @@
+//! Metrics extending functionality of the profiler.
+//!
+//! The core of this module is two traits: [`Metrics`] and [`SingleMetric`].
+//!
+//! [`SingleMetric`] is defined manually for custom metrics provider,
+//! it might be perf_event,instant,rusage, or other custom metric that reads some state.
+//!
+//! ## Example of defining custom metric provider:
+//! ```
+//! pub struct InstantProvider;
+//! impl SingleMetric for InstantProvider {
+//!    // Can use some intermediate state, that don't apear in report.
+//!    type Start = Instant;
+//!    type Result = u128; // duration in nanoseconds
+//!
+//!    fn start(&self) -> Self::Start {
+//!        Instant::now()
+//!    }
+//!    fn end(&self, start: Self::Start) -> Self::Result {
+//!        start.elapsed().as_nanos()
+//!    }
+//!    fn result_to_f64(&self, result: &Self::Result) -> f64 {
+//!        *result as f64
+//!    }
+//! }
+//! ```
+//!
+//! # Combining multiple metrics into one provider
+//!
+//! [`Metrics`] trait is used for defining a flat set of metrics
+//! for report generation, and also provides some additional
+//! functionality like formatting values and defining names of metrics.
+//!
+//! Unlike [`SingleMetric`] trait, it is designed to be used with `#[derive(Metrics)]` macro,
+//!
+//! ## Usage:
+//! ```
+//! #[derive(Metrics)]
+//! pub struct MetricsProvider {
+//!   pub wall_time: crate::InstantProvider,
+//!   #[new(perf_event::events::Hardware::CPU_CYCLES)]
+//!   pub cycles: crate::PerfEventMetric,
+//! }
+//!
+//! ```
+//! *Note: Both traits implementors should be thread-safe.*
 use std::{cell::RefCell, time::Instant};
 
 use perf_event::Counter;
@@ -63,6 +109,11 @@ pub trait SingleMetric: Send + Sync + 'static {
 
 // ── Metric implementations ────────────────────────────────────
 
+/// `perf_event` based metrics.
+///
+/// Uses `perf_event` crate to capture various hardware/software events like CPU cycles, instructions, cache misses, task clock and many others.
+/// Metrics are captured at span enter/exit by reading corresponding `perf_event` counter for current thread, and calculating difference between them.
+///
 pub struct PerfEventMetric {
     kind: perf_event::events::Event,
     // metrics are unique per thread/
@@ -125,6 +176,7 @@ impl SingleMetric for PerfEventMetric {
     }
 }
 
+/// Simple wall-time metrics that uses `Instant` to capture time at span enter/exit and calculate duration of span.
 #[derive(Default)]
 pub struct InstantProvider;
 
@@ -177,6 +229,9 @@ mod rusage {
 
     use crate::{InstantProvider, SingleMetric, format_unit_helper};
 
+    ///
+    /// Kind of rusage metric to capture, used in [`RusageMetric`] constructor.
+    ///
     #[derive(Clone, Copy, Debug)]
     pub enum RusageKind {
         UserTime,
@@ -255,7 +310,9 @@ mod rusage {
 
     /// `libc::rusage` based metrics.
     ///
-    /// This metrics are slow to update https://man.archlinux.org/man/time.7.en#The_software_clock,_HZ,_and_jiffies
+    /// Uses `libc::getrusage` at start and end of span to capture metrics like user/system time, memory usage, page faults and context switches.
+    ///
+    /// This metrics are slow to update <https://man.archlinux.org/man/time.7.en#The_software_clock,_HZ,_and_jiffies>
     /// And therefore can skip some small spans.
     pub struct RusageMetric {
         kind: RusageKind,
