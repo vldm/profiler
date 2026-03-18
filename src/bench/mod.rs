@@ -560,7 +560,7 @@ where
                 progress.render_warmup(warmup_start.elapsed(), warmup_duration, false);
             }
             progress.render_warmup(warmup_duration, warmup_duration, true);
-            let _ = self.collector.drain();
+            self.collector.freeze();
 
             // Phase 2: Measured — install collector for the measurement window.
             {

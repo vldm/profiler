@@ -45,9 +45,9 @@ pub struct MetricsProvider {
     // pub system_time: crate::RusageMetric,
 }
 
-///
-/// TODO: generate structure for Result object (with named fields instead of indexes).
-///
+//
+// TODO: generate structure for Result object (with named fields instead of indexes).
+//
 fn calculate_ipc(result: &<MetricsProvider as crate::Metrics>::Result) -> f64 {
     let instructions = result.2;
     let cycles = result.0;

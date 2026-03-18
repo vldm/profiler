@@ -619,7 +619,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
                 && baseline_enabled
             {
-                let (val, unit) = self.report.data.metrics.format_value(metric_idx, b.median);
+                let (val, unit) = self.report.data.metrics.format_value(metric_idx, b.mean);
                 let spread_pct = b.spread() * 100.0;
                 let cell = format!("baseline: {}{} ± {:.0}%", val, unit, spread_pct);
                 print!(
@@ -629,6 +629,8 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                     gap = layout.col_gap,
                     w = layout.col_w
                 );
+            } else {
+                print!("{:gap$}", "", gap = layout.col_gap + layout.col_w);
             }
         }
         println!();
@@ -731,7 +733,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                 if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
                     && baseline_enabled
                 {
-                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
+                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.mean);
                     let spread_pct = s.spread() * 100.0;
 
                     let diff_pct = if b.median.abs() > f64::EPSILON {
@@ -759,7 +761,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                         val, unit, spread_pct, color, diff_str, reset
                     )
                 } else {
-                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
+                    let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.mean);
                     let spread_pct = s.spread() * 100.0;
                     format!("{}{} ± {:.0}%", val, unit, spread_pct)
                 }

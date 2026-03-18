@@ -204,6 +204,10 @@ impl<M: Metrics> Collector<M> {
         let mut inner = self.state.lock().unwrap();
         std::mem::take(&mut inner.buffer)
     }
+    pub fn freeze(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.buffer.clear();
+    }
 }
 
 impl<M: Metrics + 'static, S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collector<M>
