@@ -63,7 +63,7 @@ pub fn write_snapshot<M: crate::Metrics>(
         paths,
         events,
     };
-    let file = File::create(path)?;
+    let file = std::io::BufWriter::new(File::create(path)?);
     serde_json::to_writer(file, &snapshot).map_err(io::Error::other)
 }
 

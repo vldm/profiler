@@ -129,7 +129,7 @@ pub trait AnalysisProgress {
 }
 
 const PRIMARY_METRIC_IDX: usize = 0;
-const LABEL_W: usize = 34;
+const LABEL_W: usize = 38;
 const COL_W: usize = 24;
 const COL_GAP: usize = 5;
 
@@ -507,7 +507,9 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         match parts.len() {
             1.. if parts[0] == "?" => {} // skip
             1 => parts[0] = &self.report.data.bench_name,
-            2.. => parts[0] = "",
+            2.. => {
+                parts.remove(0);
+            } // remove common root
             _ => {}
         }
 

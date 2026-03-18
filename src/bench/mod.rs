@@ -1,7 +1,7 @@
 //!
-//! 
-//! 
-//! 
+//!
+//!
+//!
 use std::fmt::Debug;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
