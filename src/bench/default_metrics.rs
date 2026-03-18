@@ -31,9 +31,29 @@ pub struct MetricsProvider {
     #[config(show_spread = false, show_baseline = false)]
     pub wall_time: crate::InstantProvider,
 
+    /// raw_end_fn is embedded as is, so the type of state should be specifiend.
+    /// But if field result types are copy, they can be used dirrectly (without macro hiegiene).
+    /// #[raw_end_fn(|state: &<MetricsProvider as crate::Metrics>::Result| state.2 as f64 / state.0 as f64 )]
+    /// #[raw_end_fn(|_| instructions as f64 / cycles as f64 )]
+    #[raw_end_fn(calculate_ipc)]
+    #[config(show_spread = false, show_baseline = false)]
+    pub ipc: f64,
     // /// `libc::getrusage` based metrics, is not better source for metrics in scenario of short intervals,
     // /// but still good metric for debugging time spent in kernel/user mode.
     // #[new(crate::RusageKind::SystemTime, true)]
     // #[config(show_spread = false, show_baseline = false)]
     // pub system_time: crate::RusageMetric,
+}
+
+///
+/// TODO: generate structure for Result object (with named fields instead of indexes).
+///
+fn calculate_ipc(result: &<MetricsProvider as crate::Metrics>::Result) -> f64 {
+    let instructions = result.2;
+    let cycles = result.0;
+    if cycles == 0 {
+        0.0
+    } else {
+        instructions as f64 / cycles as f64
+    }
 }

@@ -634,7 +634,7 @@ where
 /// ```
 /// fn main() {
 ///   use profiler::bench::*;
-///   let mut runner = BenchRunner::<MetricsProvider>::new(&file!()[..3]);   
+///   let mut runner = BenchRunner::<MetricsProvider>::new(file_name!());   
 ///   runner.register( (&mut &mut  BenchFn::new(bench_sort)).register_with_name("bench_sort"));     
 ///   runner.start();
 /// }
@@ -651,7 +651,12 @@ macro_rules! bench_main {
     ($metrics:ty => $($bench: ident),+) => {
         fn main() {
             use $crate::bench::*;
-            let mut runner = BenchRunner::<$metrics>::new(&file!()[..3]);
+            let name = {
+                let path = file!();
+                let name = path.rsplit('/').next().unwrap_or(path);
+                name.trim_end_matches(".rs")
+            };
+            let mut runner = BenchRunner::<$metrics>::new(name);
             $(
                 runner.register( (&mut &mut  BenchFn::new($bench)).register_with_name(stringify!($bench)));
             )+

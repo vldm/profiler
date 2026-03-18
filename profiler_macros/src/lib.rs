@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse::Parser, parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields};
 
-#[proc_macro_derive(Metrics, attributes(new, crate_path, config))]
+#[proc_macro_derive(Metrics, attributes(new, crate_path, config, raw_end_fn, calculate))]
 pub fn derive_metrics(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive_metrics_inner(input) {
@@ -41,6 +41,7 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let mut results = Vec::new();
     let mut start_calls = Vec::new();
     let mut end_calls = Vec::new();
+    let mut after_end_calls = Vec::new();
     let mut result_tuple_fields = Vec::new();
     let mut field_configs = Vec::new();
     let mut format_match_arms = Vec::new();
@@ -57,14 +58,22 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             .map(|attr| attr.meta.require_list().map(|meta| meta.tokens.clone()))
             .transpose()?;
 
-        if let Some(tokens) = custom_new {
-            default_fields.push(quote! {
-                #field_name: <#field_type>::new(#tokens)
-            });
-        } else {
-            default_fields.push(quote! {
-                #field_name: <#field_type as ::core::default::Default>::default()
-            });
+        let raw_end_fn = field
+            .attrs
+            .iter()
+            .find(|a| a.path().is_ident("raw_end_fn"))
+            .map(|attr| {
+                attr.meta
+                    .require_list()
+                    .and_then(|meta| Ok(meta.tokens.clone()))
+            })
+            .transpose()?;
+
+        if raw_end_fn.is_some() && custom_new.is_some() {
+            return Err(syn::Error::new(
+                field.span(),
+                "Cannot use both #[new] and #[raw_end_fn] on the same field",
+            ));
         }
 
         let configs = field
@@ -93,6 +102,16 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if let Some(tokens) = custom_new {
+            default_fields.push(quote! {
+                #field_name: <#field_type>::new(#tokens)
+            });
+        } else {
+            default_fields.push(quote! {
+                #field_name: <#field_type as ::core::default::Default>::default()
+            });
+        }
+
         let mut config_builder = vec![];
         for (name, value) in configs.into_iter().flatten() {
             let configs = ["show_spread", "show_baseline"];
@@ -107,15 +126,6 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             });
         }
 
-        starts.push(quote! { <#field_type as #crate_path::SingleMetric>::Start });
-        results.push(quote! { <#field_type as #crate_path::SingleMetric>::Result });
-
-        start_calls.push(quote! { #crate_path::SingleMetric::start(&self.#field_name) });
-
-        let idx_lit = syn::Index::from(idx);
-        end_calls.push(quote! { let #field_name = #crate_path::SingleMetric::end(&self.#field_name, start.#idx_lit); });
-        result_tuple_fields.push(quote! { #field_name });
-
         let field_name_str = field_name.to_string();
         field_configs.push(quote! {
            #crate_path::metrics::MetricReportInfo {
@@ -123,6 +133,27 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                ..#crate_path::metrics::MetricReportInfo::new(#field_name_str)
            }
         });
+
+        starts.push(quote! { <#field_type as #crate_path::SingleMetric>::Start });
+        results.push(quote! { <#field_type as #crate_path::SingleMetric>::Result });
+
+        start_calls.push(quote! { #crate_path::SingleMetric::start(&self.#field_name) });
+
+        let idx_lit = syn::Index::from(idx);
+        if let Some(tokens) = raw_end_fn {
+            // TODO: add asserts for field type. should impl `Default` and `FloatToInt`
+            end_calls.push(quote! { let #field_name = #field_type::default(); });
+            after_end_calls.push(quote! {
+                {
+                    let callback = #tokens;
+                    result.#idx_lit = callback(&result);
+                }
+            });
+        } else {
+            end_calls.push(quote! { let #field_name = #crate_path::SingleMetric::end(&self.#field_name, start.#idx_lit); });
+        }
+
+        result_tuple_fields.push(quote! { #field_name });
 
         format_match_arms.push(quote! {
             #idx => #crate_path::SingleMetric::format_value(&self.#field_name, value)
@@ -165,7 +196,9 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
 
             fn end(&self, start: Self::Start) -> Self::Result {
                 #(#end_calls)*
-                (#(#result_tuple_fields,)*)
+                let mut result = (#(#result_tuple_fields,)*);
+                #(#after_end_calls)*
+                result
             }
 
             fn metrics_info() -> &'static [#crate_path::metrics::MetricReportInfo] {

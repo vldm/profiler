@@ -259,6 +259,49 @@ pub fn format_unit_helper(value: f64) -> (String, &'static str) {
     }
 }
 
+macro_rules! impl_primitive_metrics {
+    ($($ty:ty),*) => {
+        $(
+            impl SingleMetric for $ty {
+                type Start = ();
+                type Result = Self;
+
+                fn start(&self) -> Self::Start {}
+                fn end(&self, _start: Self::Start) -> Self::Result {
+                    *self
+                }
+                fn result_to_f64(&self, result: &Self::Result) -> f64 {
+                    *result as f64
+                }
+            }
+        )*
+    };
+}
+impl_primitive_metrics!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, isize, f64
+);
+pub struct CalculateMetric<State, Result, Op> {
+    _phantom: std::marker::PhantomData<(State, Result)>,
+    op: Op,
+}
+
+impl<State, Result, Op> CalculateMetric<State, Result, Op>
+where
+    Result: Clone + Send + 'static + Default,
+    Op: Fn(&State) -> Result + Clone + Send + Sync + 'static,
+{
+    pub fn new(op: Op) -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+            op,
+        }
+    }
+    pub fn calculate(&self, result: &State) -> Result {
+        (self.op)(result)
+    }
+}
+
+#[cfg(feature = "libc")]
 mod rusage {
     use std::cell::RefCell;
 

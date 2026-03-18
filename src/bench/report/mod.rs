@@ -341,7 +341,7 @@ impl<M: Metrics> AnalyzedReport<M> {
                 bench_name,
                 published,
             },
-            metrics_info: dbg!(M::metrics_info()),
+            metrics_info: M::metrics_info(),
             nodes,
             roots,
         }

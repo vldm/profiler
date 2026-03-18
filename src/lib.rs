@@ -117,6 +117,21 @@ pub use crate::metrics::{
 /// <div class="warning">
 /// Note: <code>Metrics</code> and <code>SingleMetric</code> are different traits.
 /// </div>
+///
+///
+/// `#[config]` attribute allows to customize display options for each metric, see [`MetricReportInfo`] for more details.
+///
+/// # Example:
+/// ```
+/// #[derive(Metrics)]
+/// pub struct MetricsProvider {
+///     #[new(perf_event::events::Hardware::CPU_CYCLES)]
+///     #[config(show_spread = false)]
+///     pub cycles: crate::PerfEventMetric,
+/// }
+/// ```
+///
+///
 pub use profiler_macros::Metrics;
 
 pub use std::hint::black_box;
