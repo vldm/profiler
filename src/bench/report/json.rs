@@ -59,7 +59,11 @@ pub fn write_snapshot<M: crate::Metrics>(
         schema_version: 1,
         group: report.data.group_name.clone(),
         name: report.data.bench_name.clone(),
-        metric_names: report.metric_names.clone(),
+        metric_names: report
+            .metrics_info
+            .iter()
+            .map(|info| info.name.to_string())
+            .collect(),
         paths,
         events,
     };
@@ -76,7 +80,7 @@ pub fn write_aggregated_json<M: crate::Metrics>(
     }
 
     let mut json_nodes = HashMap::new();
-    let n_metrics = report.metric_names.len();
+    let n_metrics = report.metrics_info.len();
     for (key, node) in &report.nodes {
         let mut stats = Vec::with_capacity(n_metrics);
         for metric_idx in 0..n_metrics {
@@ -101,7 +105,11 @@ pub fn write_aggregated_json<M: crate::Metrics>(
     let json_report = JsonReport {
         group: report.data.group_name.clone(),
         name: report.data.bench_name.clone(),
-        metric_names: report.metric_names.clone(),
+        metric_names: report
+            .metrics_info
+            .iter()
+            .map(|info| info.name.to_string())
+            .collect(),
         nodes: json_nodes,
         roots: report.roots.clone(),
     };

@@ -50,6 +50,43 @@ use perf_event::Counter;
 pub use rusage::{RusageKind, RusageMetric};
 use thread_local::ThreadLocal;
 
+///
+/// Information about metric to be used in report generation.
+///
+/// This is static config defined during compile-time, that defines some aspects of metric presentation in reports.
+///
+#[derive(Debug)]
+pub struct MetricReportInfo {
+    /// field name used in report.
+    pub name: &'static str,
+
+    /// Whether to show spread formatting
+    pub show_spread: bool,
+
+    /// Whether to show baseline row for this metric.
+    pub show_baseline: bool,
+}
+
+impl MetricReportInfo {
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            show_spread: true,
+            show_baseline: true,
+        }
+    }
+    /// Set whether to show spread for this metric in report.
+    pub const fn with_no_spread(mut self) -> Self {
+        self.show_spread = false;
+        self
+    }
+    /// Set whether to show baseline for this metric in report.
+    pub const fn with_no_baseline(mut self) -> Self {
+        self.show_baseline = false;
+        self
+    }
+}
+
 /// Trait for deriving metrics collection.
 /// The trait might be very simmilar to `SingleMetric`, but serves different purpose:
 /// it is not only gives a way to collect metrics, but also defines structure/names of metrics for the report generation.
@@ -60,15 +97,15 @@ pub trait Metrics: Send + Sync + 'static {
     fn start(&self) -> Self::Start;
     fn end(&self, start: Self::Start) -> Self::Result;
 
-    /// Return names of all predefined metrics in the same order as they are returned by `end()`.
-    fn metrics_names() -> &'static [&'static str];
+    /// Return information about all predefined metrics in the same order as they are returned by `end()`.
+    fn metrics_info() -> &'static [MetricReportInfo];
 
     /// Convert one metric from `Result` to easy-to-analyze f64 value.
     fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64;
 
     fn result_to_f64s(&self, result: &Self::Result) -> Vec<f64> {
         let mut result_vec = Vec::new();
-        for idx in 0..Self::metrics_names().len() {
+        for idx in 0..Self::metrics_info().len() {
             result_vec.push(self.result_to_f64(idx, result));
         }
         result_vec

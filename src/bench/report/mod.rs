@@ -95,7 +95,7 @@ pub struct RawData<M: Metrics> {
 
 pub struct AnalyzedReport<M: Metrics> {
     pub data: RawData<M>,
-    pub metric_names: Vec<String>,
+    pub metrics_info: &'static [crate::metrics::MetricReportInfo],
     pub nodes: HashMap<String, SpanNode>,
     pub roots: Vec<String>,
 }
@@ -334,8 +334,6 @@ impl<M: Metrics> AnalyzedReport<M> {
             );
         }
 
-        let metric_names: Vec<String> = M::metrics_names().iter().map(|s| s.to_string()).collect();
-
         Self {
             data: RawData {
                 metrics,
@@ -343,7 +341,7 @@ impl<M: Metrics> AnalyzedReport<M> {
                 bench_name,
                 published,
             },
-            metric_names,
+            metrics_info: dbg!(M::metrics_info()),
             nodes,
             roots,
         }
@@ -437,7 +435,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             return;
         }
 
-        let n_metrics = self.report.metric_names.len();
+        let n_metrics = self.report.metrics_info.len();
         let layout = PrintLayout {
             // Give flat path a bit more room maybe, but keep standard for now
             label_w: LABEL_W,
@@ -448,11 +446,11 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
 
         // Table header
         print!("{:<label_w$}", "", label_w = layout.label_w);
-        for name in &self.report.metric_names {
+        for info in self.report.metrics_info {
             print!(
                 "{:gap$}{:>w$}",
                 "",
-                name,
+                info.name,
                 gap = layout.col_gap,
                 w = layout.col_w
             );
@@ -471,7 +469,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         if reports.is_empty() {
             return;
         }
-        let n_metrics = reports[0].0.metric_names.len();
+        let n_metrics = reports[0].0.metrics_info.len();
         let w = table_width(n_metrics);
         // let thick = "─".repeat(w);
         let thin = "- ".repeat(w / 2).trim_end().to_string();
@@ -604,28 +602,26 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             .baseline
             .and_then(|b| b.nodes.get(key).map(|n| n.stats.as_slice()));
 
-        // Row 1: name(count) and median ± spread%
+        // Row 1: name ... and baseline: median ± spread% for each metric
         print!(
             "\x1b[1m{:<label_w$}\x1b[0m",
             label,
             label_w = layout.label_w
         );
-        for (metric_idx, s) in stats.iter().enumerate() {
-            if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
+
+        for (metric_idx, _s) in stats.iter().enumerate() {
+            let baseline_enabled = self
+                .report
+                .metrics_info
+                .get(metric_idx)
+                .map_or(false, |info| info.show_baseline);
+
+            if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
+                && baseline_enabled
+            {
                 let (val, unit) = self.report.data.metrics.format_value(metric_idx, b.median);
                 let spread_pct = b.spread() * 100.0;
                 let cell = format!("baseline: {}{} ± {:.0}%", val, unit, spread_pct);
-                print!(
-                    "\x1b[1m{:gap$}{:>w$}\x1b[0m",
-                    "",
-                    cell,
-                    gap = layout.col_gap,
-                    w = layout.col_w
-                );
-            } else {
-                let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
-                let spread_pct = s.spread() * 100.0;
-                let cell = format!("{}{} ± {:.0}%", val, unit, spread_pct);
                 print!(
                     "\x1b[1m{:gap$}{:>w$}\x1b[0m",
                     "",
@@ -685,9 +681,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
     ) -> Vec<Vec<String>> {
         let mut rows = Vec::new();
 
-        if baseline_stats.is_some() {
-            rows.push(self.baseline_detail_cells(stats, baseline_stats));
-        }
+        rows.push(self.baseline_detail_cells(stats, baseline_stats));
 
         rows.push(self.range_detail_cells(stats));
         rows
@@ -700,9 +694,9 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         let child_median = primary_metric_median(&node.samples);
         let metric_name = self
             .report
-            .metric_names
+            .metrics_info
             .get(PRIMARY_METRIC_IDX)
-            .map(String::as_str)
+            .map(|info| info.name)
             .unwrap_or("metric");
 
         let text = match parent.map(|parent| primary_metric_median(&parent.samples)) {
@@ -728,7 +722,15 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             .iter()
             .enumerate()
             .map(|(metric_idx, s)| {
-                if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx)) {
+                let baseline_enabled = self
+                    .report
+                    .metrics_info
+                    .get(metric_idx)
+                    .map_or(false, |info| info.show_baseline);
+
+                if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
+                    && baseline_enabled
+                {
                     let (val, unit) = self.report.data.metrics.format_value(metric_idx, s.median);
                     let spread_pct = s.spread() * 100.0;
 
@@ -770,14 +772,23 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             .iter()
             .enumerate()
             .map(|(metric_idx, s)| {
-                let range = self.format_compact_range(metric_idx, s.min, s.max);
-                format!("\x1b[2m{}\x1b[0m", range)
+                let show_spread = self
+                    .report
+                    .metrics_info
+                    .get(metric_idx)
+                    .map_or(false, |info| info.show_spread);
+                if show_spread {
+                    let range = self.format_compact_range(metric_idx, s.min, s.max);
+                    format!("\x1b[2m{}\x1b[0m", range)
+                } else {
+                    String::new()
+                }
             })
             .collect()
     }
 
     fn compute_metric_stats(&self, node: &SpanNode) -> Vec<MetricStats> {
-        compute_metric_stats_for_samples(&node.samples, self.report.metric_names.len())
+        compute_metric_stats_for_samples(&node.samples, self.report.metrics_info.len())
     }
 
     fn format_compact_range(&self, metric_idx: usize, min: f64, max: f64) -> String {
@@ -910,8 +921,13 @@ mod tests {
             [0.0, 0.0]
         }
 
-        fn metrics_names() -> &'static [&'static str] {
-            &["primary", "secondary"]
+        fn metrics_info() -> &'static [crate::metrics::MetricReportInfo] {
+            &const {
+                [
+                    crate::metrics::MetricReportInfo::new("primary"),
+                    crate::metrics::MetricReportInfo::new("secondary"),
+                ]
+            }
         }
 
         fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64 {

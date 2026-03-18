@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "profiler"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "num_cpus",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "profiler_macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",

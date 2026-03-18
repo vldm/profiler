@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "profiler"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-span metrics based profiler and benchmarking library for Rust"
@@ -20,7 +20,7 @@ serde_json = "1.0.149"
 libc = { version = "0.2.183", optional = true }
 num_cpus = { version = "1.17.0", optional = true }
 
-profiler_macros = { version = "0.1.1", path = "profiler_macros" }
+profiler_macros = { version = "0.1.2", path = "profiler_macros" }
 
 
 [features]
