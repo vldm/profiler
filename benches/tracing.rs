@@ -2,7 +2,7 @@
 //! Example of usage `tracing` spans inside benchmark.
 //!
 //! 1. Split your main process into multiple phases using `tracing::instrument` or
-//!  `tracing::span` directly.
+//!    `tracing::span` directly.
 //! 2. Call it as regular benchmark
 //!
 //! Usage:

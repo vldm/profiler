@@ -1,7 +1,3 @@
-//!
-//!
-//!
-//!
 use std::fmt::Debug;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -632,6 +628,7 @@ where
 ///
 /// This will expand in something simiar to:
 /// ```
+/// # #[allow(clippy::needless_doctest_main)]
 /// fn main() {
 ///   use profiler::bench::*;
 ///   let mut runner = BenchRunner::<MetricsProvider>::new(file_name!());   

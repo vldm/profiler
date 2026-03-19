@@ -614,7 +614,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                 .report
                 .metrics_info
                 .get(metric_idx)
-                .map_or(false, |info| info.show_baseline);
+                .is_some_and(|info| info.show_baseline);
 
             if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
                 && baseline_enabled
@@ -681,12 +681,10 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         stats: &[MetricStats],
         baseline_stats: Option<&[MetricStats]>,
     ) -> Vec<Vec<String>> {
-        let mut rows = Vec::new();
-
-        rows.push(self.baseline_detail_cells(stats, baseline_stats));
-
-        rows.push(self.range_detail_cells(stats));
-        rows
+        vec![
+            self.baseline_detail_cells(stats, baseline_stats),
+            self.range_detail_cells(stats),
+        ]
     }
 
     fn parent_share_text(&self, key: &str) -> Option<String> {
@@ -728,7 +726,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                     .report
                     .metrics_info
                     .get(metric_idx)
-                    .map_or(false, |info| info.show_baseline);
+                    .is_some_and(|info| info.show_baseline);
 
                 if let Some(b) = baseline_stats.and_then(|bs| bs.get(metric_idx))
                     && baseline_enabled
@@ -778,7 +776,7 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
                     .report
                     .metrics_info
                     .get(metric_idx)
-                    .map_or(false, |info| info.show_spread);
+                    .is_some_and(|info| info.show_spread);
                 if show_spread {
                     let range = self.format_compact_range(metric_idx, s.min, s.max);
                     format!("\x1b[2m{}\x1b[0m", range)

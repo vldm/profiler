@@ -10,13 +10,34 @@ use std::{hint::black_box, time::Duration};
 
 use profiler::Metrics;
 
-// /// Defines custom metrics for the benchmark.
+#[global_allocator]
+static ALLOCATOR: profiler::metrics::mem::ProfileAllocator =
+    profiler::metrics::mem::ProfileAllocator::new();
+
+/// Defines custom metrics for the benchmark.
 #[derive(Metrics)]
 struct MyMetrics {
     /// CPU cycles spent in the span.
     /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
     #[new(perf_event::events::Hardware::CPU_CYCLES)]
     pub cycles: profiler::PerfEventMetric,
+
+    ///
+    /// Metrics can be marked as #[hidden], so they will be collected but not used in report.
+    ///
+    #[hidden]
+    #[new(&ALLOCATOR)]
+    pub memprofiler: profiler::metrics::mem::ProfilerMetrics,
+
+    /// #[raw_end_fn] can be used to define custom metrics from existing ones.
+    #[raw_end_fn(MyMetrics::calculate_peak)]
+    pub mem_peak: usize,
+}
+impl MyMetrics {
+    fn calculate_peak(result: &<MyMetrics as Metrics>::Result) -> usize {
+        let mem = &result.1;
+        mem.alloced_bytes
+    }
 }
 
 // -- Compare different functions --
@@ -58,11 +79,11 @@ fn with_bencher(bencher: &mut profiler::bench::Bencher) {
 
     bencher
         .name("foo")
-        .run(|| (0u64..100000).map(|i| black_box(i)).sum::<u64>());
+        .run(|| (0u64..100000).map(black_box).sum::<u64>());
 
     bencher
         .name("simple") //same name but inside a group
-        .run(|| (0u64..100000).map(|i| black_box(i)).sum::<u64>())
+        .run(|| (0u64..100000).map(black_box).sum::<u64>())
 }
 
 /// `IterScope` type allows to skip setup functionality, but keep entrypoint simple.
@@ -74,4 +95,4 @@ fn bench_scope(mut scope: profiler::bench::IterScope) {
 }
 
 // generate main with my metrics provider
-profiler::bench_main!(MyMetrics => with_bencher, simple, bench_scope);
+profiler::bench_main!(MyMetrics =>  simple, with_bencher, bench_scope);

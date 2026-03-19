@@ -85,7 +85,7 @@ impl ProfilerState {
 
     fn cleanup(&mut self) {
         // remove dead frames from the end of the vector to prevent memory leak.
-        while self.frames.last().map_or(false, |f| f.dead) {
+        while self.frames.last().is_some_and(|f| f.dead) {
             self.frames.pop();
         }
     }
@@ -93,7 +93,7 @@ impl ProfilerState {
     /// Reallocate vec manually using system allocator to prevent recursion.
     ///
     fn grow_vec(vec: &mut Vec<FrameInfo>) {
-        let old: Vec<FrameInfo> = std::mem::replace(vec, Vec::new());
+        let old: Vec<FrameInfo> = std::mem::take(vec);
         let (old_pointer, old_capacity, old_len) = old.into_raw_parts();
         let new_capacity = (old_capacity * 2).max(32);
         let layout = std::alloc::Layout::array::<FrameInfo>(new_capacity).unwrap();
@@ -147,12 +147,15 @@ impl Drop for ProfilerState {
 pub struct Handle(usize);
 
 impl ProfileAllocator {
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {}
     }
     fn with_state<U>(f: impl FnOnce(&RefCell<ProfilerState>) -> U) -> U {
         thread_local! {
-            static STATE: RefCell<ProfilerState> = RefCell::new(ProfilerState { frames: ManuallyDrop::new(Vec::new()) });
+            static STATE: RefCell<ProfilerState> = const {
+                RefCell::new(ProfilerState { frames: ManuallyDrop::new(Vec::new()) })
+            };
         }
 
         STATE.with(f)

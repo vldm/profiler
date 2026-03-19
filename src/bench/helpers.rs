@@ -8,7 +8,6 @@ use crate::bench::{Bencher, NamedBench};
 /// - `Fn() -> Any` - for simple entrypoint
 /// - `Fn(crate::bench::IterScope)` - for a benchmark with controll of it's setup scope
 /// - `Fn(&mut Bench)` - for custom entrypoint
-
 pub struct BenchFn<T>(Option<T>);
 
 impl<T> BenchFn<T> {

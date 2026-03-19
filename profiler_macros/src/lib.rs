@@ -2,7 +2,10 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse::Parser, parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields};
 
-#[proc_macro_derive(Metrics, attributes(new, crate_path, config, raw_end_fn, calculate))]
+#[proc_macro_derive(
+    Metrics,
+    attributes(new, crate_path, config, raw_end_fn, calculate, hidden)
+)]
 pub fn derive_metrics(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive_metrics_inner(input) {
@@ -47,9 +50,12 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let mut format_match_arms = Vec::new();
     let mut result_to_f64_match_arms = Vec::new();
 
+    let mut skipped_count = 0;
     for (idx, field) in fields.named.iter().enumerate() {
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
+
+        let is_hidden = field.attrs.iter().any(|a| a.path().is_ident("hidden"));
 
         let custom_new = field
             .attrs
@@ -62,11 +68,7 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             .attrs
             .iter()
             .find(|a| a.path().is_ident("raw_end_fn"))
-            .map(|attr| {
-                attr.meta
-                    .require_list()
-                    .and_then(|meta| Ok(meta.tokens.clone()))
-            })
+            .map(|attr| attr.meta.require_list().map(|meta| meta.tokens.clone()))
             .transpose()?;
 
         if raw_end_fn.is_some() && custom_new.is_some() {
@@ -102,6 +104,13 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if is_hidden && (raw_end_fn.is_some() || !configs.is_empty()) {
+            return Err(syn::Error::new(
+                field.span(),
+                "Hidden fields cannot have  #[raw_end_fn] or #[config] attributes",
+            ));
+        }
+
         if let Some(tokens) = custom_new {
             default_fields.push(quote! {
                 #field_name: <#field_type>::new(#tokens)
@@ -127,12 +136,6 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         }
 
         let field_name_str = field_name.to_string();
-        field_configs.push(quote! {
-           #crate_path::metrics::MetricReportInfo {
-               #(#config_builder)*
-               ..#crate_path::metrics::MetricReportInfo::new(#field_name_str)
-           }
-        });
 
         starts.push(quote! { <#field_type as #crate_path::SingleMetric>::Start });
         results.push(quote! { <#field_type as #crate_path::SingleMetric>::Result });
@@ -154,6 +157,19 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         }
 
         result_tuple_fields.push(quote! { #field_name });
+
+        if is_hidden {
+            skipped_count += 1;
+            continue;
+        }
+        let idx = idx - skipped_count;
+
+        field_configs.push(quote! {
+           #crate_path::metrics::MetricReportInfo {
+               #(#config_builder)*
+               ..#crate_path::metrics::MetricReportInfo::new(#field_name_str)
+           }
+        });
 
         format_match_arms.push(quote! {
             #idx => #crate_path::SingleMetric::format_value(&self.#field_name, value)
