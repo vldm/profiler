@@ -1,9 +1,76 @@
+//! Memory allocation metrics.
+//! This module provides two crucial parts:
+//! 1. implementation of global allocator [`ProfileAllocator`] that tracks different memory metrics  
+//!    If one want to use memory allocation metrics, they should set global allocator to [`ProfileAllocator`] using `#[global_allocator]` attribute.
+//!
+//! 2. [`ProfilerMetrics`] metric providers that can be used in `#[derive(Metrics)]` macro
+//!    to collect total allocated bytes and peak live memory respectively (by default report total allocated bytes).
+//!
+//! ## Example:
+//! ```rust,no_run
+//! use profiler::Metrics;
+//! use profiler::metrics::MetricAggregation;
+//! use profiler::metrics::mem::{ProfilerMetrics, ProfileAllocator};
+//!
+//! // Define global allocator to collect memory metrics.
+//! #[global_allocator]
+//! static ALLOCATOR: ProfileAllocator = ProfileAllocator::new();
+//!
+//! // Define custom metrics set used in benchmark.
+//! #[derive(Metrics)]
+//! struct MemoryMetrics {
+//!   
+//!    /// Use #[new] to provide a parameter to metric constructor.
+//!    #[new(&ALLOCATOR)]
+//!    pub memprofiler: ProfilerMetrics,
+//!
+//!    /// #[config] can be used to set custom aggregation for the metric.
+//!    #[raw_end_fn(MemoryMetrics::calculate_peak)]
+//!    #[config(aggregation = MetricAggregation::Max)]
+//!    pub mem_peak: usize,
+//! }
+//! impl MemoryMetrics {
+//!   /// Custom metric calculated from ProfilerMetrics result.
+//!   fn calculate_peak(result: &<MemoryMetrics as Metrics>::Result) -> usize {
+//!      let mem = &result.0;
+//!      mem.peak_bytes
+//!   }
+//! }
+//! ```
 use std::{alloc::GlobalAlloc, cell::RefCell, mem::ManuallyDrop};
 
+use crate::SingleMetric;
 use serde::{Deserialize, Serialize};
 
-use crate::SingleMetric;
+fn format_bytes(value: f64) -> (String, &'static str) {
+    (format!("{value:.2}"), "bytes")
+}
 
+/// Total allocated bytes inside a span.
+///
+/// Example:
+/// ```rust,no_run
+/// use profiler::Metrics;
+/// use profiler::metrics::MetricAggregation;
+/// use profiler::metrics::mem::{PeakProfilerMetrics, ProfileAllocator};
+///
+/// #[global_allocator]
+/// static ALLOCATOR: ProfileAllocator = ProfileAllocator::new();
+///
+/// #[derive(Metrics)]
+/// #[crate_path(profiler)]
+/// struct MemoryMetrics {
+///     #[new(&ALLOCATOR)]
+///     peak_memory: ProfilerMetrics,
+/// }
+/// ```
+/// This metrics provide a rich result information [`FrameInfo`] that can be used by other metrics, to calculate more specific metrics, like peak live memory.
+/// Check out module [`mem`] or benchmark `macro_extended` for more details.
+///  
+/// <div class="warning">
+/// Note: Not all memory metrics are additive, e.g. peak memory should not be sumarized across inner iterations,
+///  so one should set `aggregation = MetricAggregation::Max` for such metrics to get correct results in report.
+/// </div>
 pub struct ProfilerMetrics {
     allocator: &'static ProfileAllocator,
 }
@@ -31,7 +98,7 @@ impl SingleMetric for ProfilerMetrics {
     }
 
     fn format_value(&self, value: f64) -> (String, &'static str) {
-        (format!("{:.2}", value), "bytes")
+        format_bytes(value)
     }
 }
 

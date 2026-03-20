@@ -4,7 +4,7 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 
-use super::MetricStats;
+use super::{MetricStats, path_to_string};
 
 #[derive(Serialize, Deserialize)]
 pub struct ReportSnapshot {
@@ -13,7 +13,7 @@ pub struct ReportSnapshot {
     pub name: String,
     pub metric_names: Vec<String>,
     pub paths: Vec<Vec<String>>,
-    pub events: Vec<(usize, Vec<f64>)>,
+    pub outer_iters: Vec<Vec<(usize, Vec<f64>)>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,20 +43,24 @@ pub fn write_snapshot<M: crate::Metrics>(
 
     let mut paths = Vec::new();
     let mut path_to_index = HashMap::new();
-    let mut events = Vec::with_capacity(report.data.published.len());
+    let mut outer_iters = Vec::with_capacity(report.data.published.len());
 
-    for (p, result) in &report.data.published {
-        let idx = *path_to_index.entry(p.clone()).or_insert_with(|| {
-            let i = paths.len();
-            paths.push(p.clone());
-            i
-        });
-        let values = report.data.metrics.result_to_f64s(result);
-        events.push((idx, values));
+    for group in &report.data.published {
+        let mut group_events = Vec::with_capacity(group.events.len());
+        for event in &group.events {
+            let idx = *path_to_index.entry(event.path.clone()).or_insert_with(|| {
+                let i = paths.len();
+                paths.push(event.path.clone());
+                i
+            });
+            let values = report.data.metrics.result_to_f64s(&event.result);
+            group_events.push((idx, values));
+        }
+        outer_iters.push(group_events);
     }
 
     let snapshot = ReportSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         group: report.data.group_name.clone(),
         name: report.data.bench_name.clone(),
         metric_names: report
@@ -65,7 +69,7 @@ pub fn write_snapshot<M: crate::Metrics>(
             .map(|info| info.name.to_string())
             .collect(),
         paths,
-        events,
+        outer_iters,
     };
     let file = std::io::BufWriter::new(File::create(path)?);
     serde_json::to_writer(file, &snapshot).map_err(io::Error::other)
@@ -91,13 +95,18 @@ pub fn write_aggregated_json<M: crate::Metrics>(
                 .collect();
             stats.push(MetricStats::from_values(&vals));
         }
+        let key_str = path_to_string(key);
         json_nodes.insert(
-            key.clone(),
+            key_str,
             JsonSpanNode {
                 name: node.name.clone(),
                 samples: node.samples.len(),
                 stats,
-                children: node.children.clone(),
+                children: report
+                    .sorted_child_keys(key)
+                    .into_iter()
+                    .map(|child| path_to_string(&child))
+                    .collect(),
             },
         );
     }
@@ -111,7 +120,7 @@ pub fn write_aggregated_json<M: crate::Metrics>(
             .map(|info| info.name.to_string())
             .collect(),
         nodes: json_nodes,
-        roots: report.roots.clone(),
+        roots: report.roots.iter().map(|root| path_to_string(root)).collect(),
     };
 
     let file = File::create(path)?;

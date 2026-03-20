@@ -31,12 +31,13 @@ struct MyMetrics {
 
     /// #[raw_end_fn] can be used to define custom metrics from existing ones.
     #[raw_end_fn(MyMetrics::calculate_peak)]
+    #[config(aggregation = profiler::metrics::MetricAggregation::Max)]
     pub mem_peak: usize,
 }
 impl MyMetrics {
     fn calculate_peak(result: &<MyMetrics as Metrics>::Result) -> usize {
         let mem = &result.1;
-        mem.alloced_bytes
+        mem.peak_bytes
     }
 }
 
@@ -77,9 +78,10 @@ fn with_bencher(bencher: &mut profiler::bench::Bencher) {
         .min_run_time(Duration::from_secs(3))
         .warmup_seconds(3);
 
-    bencher
-        .name("foo")
-        .run(|| (0u64..100000).map(black_box).sum::<u64>());
+    bencher.name("with alloc").run(|| {
+        let vec = (0u64..100000).map(black_box).collect::<Vec<_>>();
+        black_box(vec).iter().sum::<u64>()
+    });
 
     bencher
         .name("simple") //same name but inside a group

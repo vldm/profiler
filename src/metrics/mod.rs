@@ -6,7 +6,10 @@
 //! it might be perf_event,instant,rusage, or other custom metric that reads some state.
 //!
 //! ## Example of defining custom metric provider:
-//! ```
+//! ```rust
+//! use profiler::SingleMetric;
+//! use std::time::Instant;
+//!
 //! pub struct InstantProvider;
 //! impl SingleMetric for InstantProvider {
 //!    // Can use some intermediate state, that don't apear in report.
@@ -34,12 +37,15 @@
 //! Unlike [`SingleMetric`] trait, it is designed to be used with `#[derive(Metrics)]` macro,
 //!
 //! ## Usage:
-//! ```
+//! ```rust
+//! use profiler::{InstantProvider, Metrics, PerfEventMetric};
+//! use profiler::metrics::perf_event;
+//!
 //! #[derive(Metrics)]
 //! pub struct MetricsProvider {
-//!   pub wall_time: crate::InstantProvider,
+//!   pub wall_time: InstantProvider,
 //!   #[new(perf_event::events::Hardware::CPU_CYCLES)]
-//!   pub cycles: crate::PerfEventMetric,
+//!   pub cycles: PerfEventMetric,
 //! }
 //!
 //! ```
@@ -58,6 +64,33 @@ mod perf;
 mod rusage;
 
 ///
+/// How to aggregate multiple samples within one run.
+/// For example, you can define code in two ways:
+/// ```rust,no_build
+/// fn bench_entry(){
+///     for i in 0..10 {
+///       let _span = tracing::span_info!("span1").entered;
+///       // Your code here
+///     }
+///     let _span = tracing::span_info!("span2").entered;
+///     for i in 0..10 {
+///        // Your code here
+///     }
+/// }
+/// ```
+/// The first spann will apear in metrics 10 times, while second only one, this makes it harder to compare them in report,
+///  so we agregate inner spans with some of these strategies.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricAggregation {
+    /// Add values from repeated spans inside one outer iteration.
+    /// Default strategy - recommended for most metrics, like time or cpu usage.
+    Sum,
+    /// Keep the maximum value seen inside one outer iteration.
+    /// Usefull for peak memory consumption, or other non-additive metrics.
+    Max,
+}
+///
 /// Information about metric to be used in report generation.
 ///
 /// This is static config defined during compile-time, that defines some aspects of metric presentation in reports.
@@ -72,6 +105,9 @@ pub struct MetricReportInfo {
 
     /// Whether to show baseline row for this metric.
     pub show_baseline: bool,
+
+    /// How multiple samples of the same span inside one outer iteration are combined.
+    pub aggregation: MetricAggregation,
 }
 
 impl MetricReportInfo {
@@ -80,6 +116,7 @@ impl MetricReportInfo {
             name,
             show_spread: true,
             show_baseline: true,
+            aggregation: MetricAggregation::Sum,
         }
     }
     /// Set whether to show spread for this metric in report.
@@ -90,6 +127,12 @@ impl MetricReportInfo {
     /// Set whether to show baseline for this metric in report.
     pub const fn with_no_baseline(mut self) -> Self {
         self.show_baseline = false;
+        self
+    }
+
+    /// Set aggregation strategy for repeated spans inside one outer iteration.
+    pub const fn with_aggregation(mut self, aggregation: MetricAggregation) -> Self {
+        self.aggregation = aggregation;
         self
     }
 }

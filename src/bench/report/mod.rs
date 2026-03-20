@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     io,
     path::{Path, PathBuf},
@@ -9,7 +9,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tracing::Id;
 
-use crate::{Metrics, ProfileEntry};
+use crate::{Metrics, ProfileEntry, metrics::MetricReportInfo};
+
+type PathKey = Vec<String>;
 
 /// One node in the aggregated span tree, keyed by (name, parent_key).
 pub mod json;
@@ -30,7 +32,18 @@ pub struct SpanNode {
     pub name: String,
     /// `samples[i][j]` = value of metric `j` in sample `i`.
     pub samples: Vec<Vec<f64>>,
-    pub children: Vec<String>, // child keys (ordered, deduplicated)
+}
+
+#[derive(Clone)]
+pub struct PublishedEvent<R> {
+    pub path: Vec<String>,
+    pub result: R,
+}
+
+#[derive(Clone)]
+pub struct PublishedRoot<R> {
+    pub root_id: Id,
+    pub events: Vec<PublishedEvent<R>>,
 }
 
 /// Statistics for one metric across samples.
@@ -90,21 +103,20 @@ pub struct RawData<M: Metrics> {
     pub metrics: Arc<M>,
     pub group_name: Option<String>,
     pub bench_name: String,
-    pub published: Vec<(Vec<String>, M::Result)>,
+    pub published: Vec<PublishedRoot<M::Result>>,
 }
 
 pub struct AnalyzedReport<M: Metrics> {
     pub data: RawData<M>,
     pub metrics_info: &'static [crate::metrics::MetricReportInfo],
-    pub nodes: HashMap<String, SpanNode>,
-    pub roots: Vec<String>,
+    pub nodes: BTreeMap<PathKey, SpanNode>,
+    pub roots: Vec<PathKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnalysisPhase {
     FillPublished,
     AggregatePublished,
-    FinalizeSorting,
 }
 
 impl AnalysisPhase {
@@ -112,7 +124,6 @@ impl AnalysisPhase {
         match self {
             AnalysisPhase::FillPublished => "raw spans",
             AnalysisPhase::AggregatePublished => "aggregate spans",
-            AnalysisPhase::FinalizeSorting => "sort medians",
         }
     }
 }
@@ -176,20 +187,22 @@ impl<M: Metrics> AnalyzedReport<M> {
         M::Result: Debug,
         M::Start: Debug,
     {
-        // Collect results for each span, underway converting from span id to path.
-        let mut published = Vec::new();
-
-        // list of spans currently "in flight"
-        let mut span_frame: HashMap<Id, Vec<&'static str>> = HashMap::new();
-        publish_progress(
-            &mut progress,
-            AnalysisPhase::FillPublished,
-            0,
-            entries.len(),
-        );
-        for (idx, entry) in entries.iter().enumerate() {
+        fn entry_id<Start, Result>(entry: &ProfileEntry<Start, Result>) -> &Id {
             match entry {
-                // Phase 1: map span Id → (name, parent_id) from Register entries.
+                ProfileEntry::Register { id, .. } | ProfileEntry::Publish { id, .. } => id,
+            }
+        }
+
+        fn collect_entry<M: Metrics>(
+            entry: &ProfileEntry<M::Start, M::Result>,
+            root_id: &Id,
+            span_frame: &mut HashMap<Id, Vec<&'static str>>,
+            current_group: &mut Vec<PublishedEvent<M::Result>>,
+        ) -> bool
+        where
+            M::Result: Clone,
+        {
+            match entry {
                 ProfileEntry::Register {
                     id,
                     metadata,
@@ -203,136 +216,126 @@ impl<M: Metrics> AnalyzedReport<M> {
                     parent_key.push(metadata.map(|meta| meta.name()).unwrap_or("unknown"));
 
                     span_frame.insert(id.clone(), parent_key);
+                    false
                 }
-                // Phase 2: for each Id compute its aggregation key (name path).
-                // Cache to avoid repeated traversal.
                 ProfileEntry::Publish { id, result } => {
                     let path = span_frame.get(id).cloned().unwrap_or_else(|| vec!["?"]);
 
-                    let owned_path: Vec<String> = path.into_iter().map(|s| s.to_string()).collect();
-                    published.push((owned_path, result.clone()));
-                    // other span can be created buy not entered before parent is exited, so we can't remove it.
-                    // span_frame.remove(id);
+                    current_group.push(PublishedEvent {
+                        path: path.into_iter().map(|s| s.to_string()).collect(),
+                        result: result.clone(),
+                    });
+
+                    id == root_id
                 }
             }
-            publish_progress(
-                &mut progress,
-                AnalysisPhase::FillPublished,
-                idx + 1,
-                entries.len(),
-            );
         }
 
-        Self::from_published_entries_with_progress(
+        // Collect results for each span, grouping outer iterations from the
+        // root Register entry until the matching root Publish entry.
+        let mut published = Vec::new();
+
+        // list of spans currently "in flight"
+        let mut span_frame: HashMap<Id, Vec<&'static str>> = HashMap::new();
+        publish_progress(
+            &mut progress,
+            AnalysisPhase::FillPublished,
+            0,
+            entries.len(),
+        );
+        let mut entries_iter = entries.iter().enumerate();
+        while let Some((_, root_entry)) = entries_iter.next() {
+            let root_id = entry_id(root_entry).clone();
+
+            let mut current_group = Vec::new();
+            let publish =
+                collect_entry::<M>(root_entry, &root_id, &mut span_frame, &mut current_group);
+            assert!(
+                !publish,
+                "Expected root entry to be a Register, but got Publish: {:?}",
+                root_entry
+            );
+            for (idx, entry) in &mut entries_iter {
+                let root_closed =
+                    collect_entry::<M>(entry, &root_id, &mut span_frame, &mut current_group);
+                publish_progress(
+                    &mut progress,
+                    AnalysisPhase::FillPublished,
+                    idx + 1,
+                    entries.len(),
+                );
+
+                if root_closed {
+                    published.push(PublishedRoot {
+                        root_id: root_id.clone(),
+                        events: current_group,
+                    });
+                    break;
+                }
+            }
+        }
+
+        Self::from_grouped_published_entries_with_progress(
             published, metrics, group_name, bench_name, progress,
         )
     }
 
-    fn from_published_entries_with_progress(
-        published: Vec<(Vec<String>, M::Result)>,
+    fn from_grouped_published_entries_with_progress(
+        published: Vec<PublishedRoot<M::Result>>,
         metrics: Arc<M>,
         group_name: Option<String>,
         bench_name: String,
         mut progress: Option<&mut dyn AnalysisProgress>,
     ) -> Self {
-        fn format_path(path: &[String]) -> String {
-            path.join("/")
-        }
-
-        let mut nodes: HashMap<String, SpanNode> = HashMap::new();
-        let mut roots: Vec<String> = Vec::new();
-        let mut root_set: HashSet<String> = HashSet::new();
+        let mut nodes: BTreeMap<PathKey, SpanNode> = BTreeMap::new();
+        let mut root_set: HashSet<PathKey> = HashSet::new();
+        let total_published: usize = published.iter().map(|group| group.events.len()).sum();
+        let total_outer_iters = published.len();
+        let n_metrics = M::metrics_info().len();
+        let metrics_info = M::metrics_info();
 
         publish_progress(
             &mut progress,
             AnalysisPhase::AggregatePublished,
             0,
-            published.len(),
+            total_published,
         );
-        for (idx, (path, result)) in published.iter().enumerate() {
-            let values = metrics.result_to_f64s(result);
+        let mut aggregated = 0usize;
+        for (outer_iter_idx, group) in published.iter().enumerate() {
+            for entry in &group.events {
+                let values = metrics.result_to_f64s(&entry.result);
 
-            let key = format_path(path);
-            let name = path.last().cloned().unwrap_or_else(|| "?".to_string());
-
-            nodes
-                .entry(key.clone())
-                .or_insert_with(|| SpanNode {
-                    name: name.clone(),
+                let key = entry.path.clone();
+                ensure_parent_chain(&mut nodes, &key);
+                let node = nodes.entry(key.clone()).or_insert_with(|| SpanNode {
+                    name: path_name(&key),
                     samples: Vec::new(),
-                    children: Vec::new(),
-                })
-                .samples
-                .push(values);
-
-            if let Some(parent_key) = parent_key(key.as_str()) {
-                let parent_key = parent_key.to_string();
-                let parent_name = parent_key
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(parent_key.as_str())
-                    .to_string();
-                let pnode = nodes.entry(parent_key.clone()).or_insert_with(|| SpanNode {
-                    name: parent_name,
-                    samples: Vec::new(),
-                    children: Vec::new(),
                 });
-                if !pnode.children.contains(&key) {
-                    pnode.children.push(key.clone());
+                merge_outer_iter_sample(node, outer_iter_idx, &values, n_metrics, metrics_info);
+
+                if parent_path(&key).is_none() {
+                    root_set.insert(key.clone());
                 }
-            } else if root_set.insert(key.clone()) {
-                roots.push(key.clone());
+
+                aggregated += 1;
+                publish_progress(
+                    &mut progress,
+                    AnalysisPhase::AggregatePublished,
+                    aggregated,
+                    total_published,
+                );
             }
-
-            publish_progress(
-                &mut progress,
-                AnalysisPhase::AggregatePublished,
-                idx + 1,
-                published.len(),
-            );
         }
-        roots.push("?".to_string()); // add "unknown" root for spans without Register entry
 
-        let node_keys: Vec<String> = nodes.keys().cloned().collect();
-        let finalize_total = node_keys.len() + 2;
-        publish_progress(
-            &mut progress,
-            AnalysisPhase::FinalizeSorting,
-            0,
-            finalize_total,
-        );
+        extend_all_samples_to_outer_iters(&mut nodes, total_outer_iters, n_metrics);
 
-        let primary_medians: HashMap<String, f64> = nodes
-            .iter()
-            .map(|(key, node)| (key.clone(), primary_metric_median(&node.samples)))
-            .collect();
-        publish_progress(
-            &mut progress,
-            AnalysisPhase::FinalizeSorting,
-            1,
-            finalize_total,
-        );
-
-        roots.sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
-        publish_progress(
-            &mut progress,
-            AnalysisPhase::FinalizeSorting,
-            2,
-            finalize_total,
-        );
-
-        for (idx, key) in node_keys.into_iter().enumerate() {
-            if let Some(node) = nodes.get_mut(&key) {
-                node.children
-                    .sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &primary_medians));
-            }
-            publish_progress(
-                &mut progress,
-                AnalysisPhase::FinalizeSorting,
-                idx + 3,
-                finalize_total,
-            );
+        let unknown_root = vec!["?".to_string()];
+        if nodes.contains_key(unknown_root.as_slice()) {
+            root_set.insert(unknown_root.clone()); // add "unknown" root for spans without Register entry
         }
+        let mut roots = root_set.into_iter().collect::<Vec<_>>();
+
+        roots.sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &nodes));
 
         Self {
             data: RawData {
@@ -423,6 +426,76 @@ fn publish_progress(
     }
 }
 
+fn merge_metric_samples(sample: &mut [f64], values: &[f64], metrics_info: &[MetricReportInfo]) {
+    for (metric_idx, value) in values.iter().copied().enumerate() {
+        match metrics_info
+            .get(metric_idx)
+            .map(|info| info.aggregation)
+            .unwrap_or(crate::metrics::MetricAggregation::Sum)
+        {
+            crate::metrics::MetricAggregation::Sum => sample[metric_idx] += value,
+            crate::metrics::MetricAggregation::Max => {
+                sample[metric_idx] = sample[metric_idx].max(value);
+            }
+        }
+    }
+}
+
+fn path_name(path: &[String]) -> String {
+    path.last().cloned().unwrap_or_else(|| "?".to_string())
+}
+
+fn path_to_string(path: &[String]) -> String {
+    path.join("/")
+}
+
+fn parent_path(path: &[String]) -> Option<PathKey> {
+    (path.len() > 1).then(|| path[..path.len() - 1].to_vec())
+}
+
+fn ensure_parent_chain(nodes: &mut BTreeMap<PathKey, SpanNode>, path: &[String]) {
+    for depth in 1..path.len() {
+        let parent = path[..depth].to_vec();
+        nodes.entry(parent.clone()).or_insert_with(|| SpanNode {
+            name: path_name(&parent),
+            samples: Vec::new(),
+        });
+    }
+}
+
+fn merge_outer_iter_sample(
+    node: &mut SpanNode,
+    outer_iter_idx: usize,
+    values: &[f64],
+    n_metrics: usize,
+    metrics_info: &[MetricReportInfo],
+) {
+    // extend in case of skipped outer iterations.
+    if node.samples.len() < outer_iter_idx {
+        node.samples.resize(outer_iter_idx, vec![0.0; n_metrics]);
+    }
+
+    // push instead of merge to avoid affecting of Max in negative values
+    if node.samples.len() == outer_iter_idx {
+        node.samples.push(values.to_vec());
+        return;
+    }
+
+    merge_metric_samples(&mut node.samples[outer_iter_idx], values, metrics_info);
+}
+
+fn extend_all_samples_to_outer_iters(
+    nodes: &mut BTreeMap<PathKey, SpanNode>,
+    total_outer_iters: usize,
+    n_metrics: usize,
+) {
+    for node in nodes.values_mut() {
+        if node.samples.len() < total_outer_iters {
+            node.samples.resize(total_outer_iters, vec![0.0; n_metrics]);
+        }
+    }
+}
+
 pub struct ReportPrinter<'a, M: Metrics> {
     pub report: &'a AnalyzedReport<M>,
     pub baseline: Option<&'a json::JsonReport>,
@@ -499,8 +572,8 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         }
     }
 
-    fn format_flat_path(&self, key: &str, max_len: usize) -> String {
-        let mut parts: Vec<&str> = key.split('/').collect();
+    fn format_flat_path(&self, key: &[String], max_len: usize) -> String {
+        let mut parts: Vec<&str> = key.iter().map(String::as_str).collect();
 
         match parts.len() {
             1.. if parts[0] == "?" => {} // skip
@@ -570,15 +643,15 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         format!("{}...", trunc)
     }
 
-    fn print_node(&self, key: &str, layout: PrintLayout) {
+    fn print_node(&self, key: &[String], layout: PrintLayout) {
         let node = match self.report.nodes.get(key) {
             Some(n) => n,
             None => return,
         };
 
         if node.samples.is_empty() {
-            for child_key in &node.children {
-                self.print_node(child_key, layout);
+            for child_key in self.report.sorted_child_keys(key) {
+                self.print_node(&child_key, layout);
             }
             return;
         }
@@ -598,9 +671,10 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             label = format!("{}...", trunc);
         }
 
+        let key_str = path_to_string(key);
         let baseline_stats = self
             .baseline
-            .and_then(|b| b.nodes.get(key).map(|n| n.stats.as_slice()));
+            .and_then(|b| b.nodes.get(&key_str).map(|n| n.stats.as_slice()));
 
         // Row 1: name ... and baseline: median ± spread% for each metric
         print!(
@@ -652,8 +726,8 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
             self.print_labeled_detail_row(label, &row, layout);
         }
 
-        for child_key in &node.children {
-            self.print_node(child_key, layout);
+        for child_key in self.report.sorted_child_keys(key) {
+            self.print_node(&child_key, layout);
         }
     }
 
@@ -687,10 +761,10 @@ impl<'a, M: Metrics> ReportPrinter<'a, M> {
         ]
     }
 
-    fn parent_share_text(&self, key: &str) -> Option<String> {
-        let parent_key = parent_key(key)?;
+    fn parent_share_text(&self, key: &[String]) -> Option<String> {
+        let parent_key = parent_path(key)?;
         let node = self.report.nodes.get(key)?;
-        let parent = self.report.nodes.get(parent_key);
+        let parent = self.report.nodes.get(parent_key.as_slice());
         let child_median = primary_metric_median(&node.samples);
         let metric_name = self
             .report
@@ -828,18 +902,34 @@ fn primary_metric_median(samples: &[Vec<f64>]) -> f64 {
 }
 
 fn compare_node_keys_by_primary_metric(
-    a: &str,
-    b: &str,
-    primary_medians: &HashMap<String, f64>,
+    a: &[String],
+    b: &[String],
+    nodes: &BTreeMap<PathKey, SpanNode>,
 ) -> std::cmp::Ordering {
-    let a_metric = primary_medians.get(a).copied().unwrap_or_default();
-    let b_metric = primary_medians.get(b).copied().unwrap_or_default();
+    let a_metric = nodes
+        .get(a)
+        .map(|node| primary_metric_median(&node.samples))
+        .unwrap_or_default();
+    let b_metric = nodes
+        .get(b)
+        .map(|node| primary_metric_median(&node.samples))
+        .unwrap_or_default();
 
     b_metric.total_cmp(&a_metric).then_with(|| a.cmp(b))
 }
 
-fn parent_key(key: &str) -> Option<&str> {
-    key.rsplit_once('/').map(|(parent, _)| parent)
+impl<M: Metrics> AnalyzedReport<M> {
+    fn sorted_child_keys(&self, parent: &[String]) -> Vec<PathKey> {
+        let mut children: Vec<PathKey> = self
+            .nodes
+            .range(parent.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(parent))
+            .filter(|(key, _)| key.len() == parent.len() + 1)
+            .map(|(key, _)| key.clone())
+            .collect();
+        children.sort_by(|a, b| compare_node_keys_by_primary_metric(a, b, &self.nodes));
+        children
+    }
 }
 
 fn visible_width(value: &str) -> usize {
@@ -904,7 +994,8 @@ mod tests {
 
     use super::{
         AnalysisPhase, AnalysisProgress, AnalysisProgressState, AnalyzedReport, MetricStats,
-        ReportPrinter, json,
+        PathKey, PublishedEvent, PublishedRoot, ReportPrinter, SpanNode,
+        compute_metric_stats_for_samples, json, path_to_string,
     };
     use crate::{Metrics, ProfileEntry};
 
@@ -939,30 +1030,102 @@ mod tests {
         }
     }
 
-    fn report_from_published(entries: Vec<(Vec<&str>, [f64; 2])>) -> AnalyzedReport<TestMetrics> {
-        let published = entries
+    #[derive(Default)]
+    struct PeakMetrics;
+
+    impl Metrics for PeakMetrics {
+        type Start = ();
+        type Result = [f64; 2];
+
+        fn start(&self) -> Self::Start {}
+
+        fn end(&self, _start: Self::Start) -> Self::Result {
+            [0.0, 0.0]
+        }
+
+        fn metrics_info() -> &'static [crate::metrics::MetricReportInfo] {
+            &const {
+                [
+                    crate::metrics::MetricReportInfo::new("sum"),
+                    crate::metrics::MetricReportInfo::new("peak")
+                        .with_aggregation(crate::metrics::MetricAggregation::Max),
+                ]
+            }
+        }
+
+        fn result_to_f64(&self, metric_idx: usize, result: &Self::Result) -> f64 {
+            result[metric_idx]
+        }
+
+        fn format_value(&self, _metric_idx: usize, value: f64) -> (String, &'static str) {
+            (format!("{value:.1}"), "")
+        }
+    }
+
+    fn report_from_outer_iters_with_metrics<Mt: Metrics<Result = [f64; 2], Start = ()>>(
+        metrics: Arc<Mt>,
+        outer_iters: Vec<Vec<(Vec<&str>, [f64; 2])>>,
+    ) -> AnalyzedReport<Mt> {
+        let published = outer_iters
             .into_iter()
-            .map(|(path, result)| {
-                (
-                    path.into_iter()
-                        .map(|segment| segment.to_string())
-                        .collect(),
-                    result,
-                )
+            .enumerate()
+            .map(|(outer_iter_idx, entries)| PublishedRoot {
+                root_id: Id::from_u64(outer_iter_idx as u64 + 1),
+                events: entries
+                    .into_iter()
+                    .map(|(path, result)| PublishedEvent {
+                        path: path
+                            .into_iter()
+                            .map(|segment| segment.to_string())
+                            .collect(),
+                        result,
+                    })
+                    .collect(),
             })
             .collect();
 
-        AnalyzedReport::from_published_entries_with_progress(
+        AnalyzedReport::from_grouped_published_entries_with_progress(
             published,
-            Arc::new(TestMetrics),
+            metrics,
             None,
             "bench".to_string(),
             None,
         )
     }
 
+    fn report_from_outer_iters(
+        outer_iters: Vec<Vec<(Vec<&str>, [f64; 2])>>,
+    ) -> AnalyzedReport<TestMetrics> {
+        report_from_outer_iters_with_metrics(Arc::new(TestMetrics), outer_iters)
+    }
+
+    fn report_from_single_outer_iter(
+        entries: Vec<(Vec<&str>, [f64; 2])>,
+    ) -> AnalyzedReport<TestMetrics> {
+        report_from_outer_iters(vec![entries])
+    }
+
     fn stats(values: &[f64]) -> MetricStats {
         MetricStats::from_values(values)
+    }
+
+    fn path(segments: &[&str]) -> PathKey {
+        segments
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect()
+    }
+
+    fn node<'a, M: Metrics>(report: &'a AnalyzedReport<M>, segments: &[&str]) -> &'a SpanNode {
+        report.nodes.get(path(segments).as_slice()).unwrap()
+    }
+
+    fn child_paths<M: Metrics>(report: &AnalyzedReport<M>, segments: &[&str]) -> Vec<String> {
+        report
+            .sorted_child_keys(path(segments).as_slice())
+            .into_iter()
+            .map(|child| path_to_string(&child))
+            .collect()
     }
 
     #[derive(Default)]
@@ -1019,81 +1182,79 @@ mod tests {
             completed: 0,
             total: 1,
         }));
-        assert!(progress.updates.iter().any(|state| {
-            state.phase == AnalysisPhase::FinalizeSorting && state.completed == 0
-        }));
-        assert_eq!(
-            progress.updates.last().copied(),
-            Some(AnalysisProgressState {
-                phase: AnalysisPhase::FinalizeSorting,
-                completed: 3,
-                total: 3,
-            })
-        );
     }
 
     #[test]
     fn sorts_roots_by_primary_metric_descending() {
-        let report = report_from_published(vec![
+        let report = report_from_single_outer_iter(vec![
             (vec!["alpha"], [10.0, 500.0]),
             (vec!["beta"], [30.0, 100.0]),
             (vec!["gamma"], [20.0, 900.0]),
         ]);
 
-        assert_eq!(report.roots, vec!["beta", "gamma", "alpha"]);
+        assert_eq!(
+            report.roots,
+            vec![path(&["beta"]), path(&["gamma"]), path(&["alpha"])]
+        );
     }
 
     #[test]
     fn sorts_siblings_by_primary_metric_not_secondary_metric() {
-        let report = report_from_published(vec![
+        let report = report_from_single_outer_iter(vec![
             (vec!["root"], [100.0, 0.0]),
             (vec!["root", "alpha"], [10.0, 900.0]),
             (vec!["root", "beta"], [20.0, 100.0]),
         ]);
 
         assert_eq!(
-            report.nodes.get("root").unwrap().children,
+            child_paths(&report, &["root"]),
             vec!["root/beta", "root/alpha"]
         );
     }
 
     #[test]
     fn breaks_primary_metric_ties_by_path() {
-        let report = report_from_published(vec![
+        let report = report_from_single_outer_iter(vec![
             (vec!["root"], [100.0, 0.0]),
             (vec!["root", "beta"], [20.0, 1.0]),
             (vec!["root", "alpha"], [20.0, 9.0]),
         ]);
 
         assert_eq!(
-            report.nodes.get("root").unwrap().children,
+            child_paths(&report, &["root"]),
             vec!["root/alpha", "root/beta"]
         );
     }
 
     #[test]
     fn computes_parent_share_from_primary_metric_median() {
-        let report = report_from_published(vec![
-            (vec!["root"], [10.0, 0.0]),
-            (vec!["root"], [30.0, 0.0]),
-            (vec!["root", "child"], [5.0, 0.0]),
-            (vec!["root", "child"], [15.0, 0.0]),
+        let report = report_from_outer_iters(vec![
+            vec![
+                (vec!["root"], [10.0, 0.0]),
+                (vec!["root", "child"], [5.0, 0.0]),
+            ],
+            vec![
+                (vec!["root"], [30.0, 0.0]),
+                (vec!["root", "child"], [15.0, 0.0]),
+            ],
         ]);
         let printer = ReportPrinter {
             report: &report,
             baseline: None,
         };
 
-        assert_eq!(printer.parent_share_text("root"), None);
+        assert_eq!(printer.parent_share_text(path(&["root"]).as_slice()), None);
         assert_eq!(
-            printer.parent_share_text("root/child").as_deref(),
+            printer
+                .parent_share_text(path(&["root", "child"]).as_slice())
+                .as_deref(),
             Some("50% primary of parent")
         );
     }
 
     #[test]
     fn renders_parent_share_as_na_when_parent_primary_metric_is_zero() {
-        let report = report_from_published(vec![
+        let report = report_from_single_outer_iter(vec![
             (vec!["root"], [0.0, 0.0]),
             (vec!["root", "child"], [10.0, 0.0]),
         ]);
@@ -1103,14 +1264,16 @@ mod tests {
         };
 
         assert_eq!(
-            printer.parent_share_text("root/child").as_deref(),
+            printer
+                .parent_share_text(path(&["root", "child"]).as_slice())
+                .as_deref(),
             Some("n/a primary of parent")
         );
     }
 
     #[test]
     fn parent_share_is_moved_into_label_and_detail_rows_remain_compact() {
-        let report = report_from_published(vec![
+        let report = report_from_single_outer_iter(vec![
             (vec!["root"], [40.0, 4.0]),
             (vec!["root", "child"], [20.0, 2.0]),
         ]);
@@ -1136,7 +1299,7 @@ mod tests {
             baseline: Some(&baseline),
         };
 
-        let node_stats = printer.compute_metric_stats(report.nodes.get("root/child").unwrap());
+        let node_stats = printer.compute_metric_stats(node(&report, &["root", "child"]));
         let rows = printer.detail_rows_for_node(
             &node_stats,
             baseline
@@ -1146,11 +1309,110 @@ mod tests {
         );
 
         assert_eq!(
-            printer.parent_share_text("root/child").as_deref(),
+            printer
+                .parent_share_text(path(&["root", "child"]).as_slice())
+                .as_deref(),
             Some("50% primary of parent")
         );
         assert_eq!(rows.len(), 2);
         assert!(rows[0][0].contains("+100.00%"));
         assert!(rows[1][0].contains("[20.0 .. 20.0]"));
+    }
+
+    #[test]
+    fn aggregates_multiple_inner_events_per_outer_iteration() {
+        let root_iter_1 = Id::from_u64(1);
+        let child_iter_1_first = Id::from_u64(2);
+        let child_iter_1_second = Id::from_u64(3);
+        let root_iter_2 = Id::from_u64(4);
+        let child_iter_2 = Id::from_u64(5);
+
+        let entries = vec![
+            ProfileEntry::Register {
+                id: root_iter_1.clone(),
+                metadata: None,
+                parent: None,
+                start: (),
+            },
+            ProfileEntry::Register {
+                id: child_iter_1_first.clone(),
+                metadata: None,
+                parent: Some(root_iter_1.clone()),
+                start: (),
+            },
+            ProfileEntry::Publish {
+                id: child_iter_1_first,
+                result: [2.0, 20.0],
+            },
+            ProfileEntry::Register {
+                id: child_iter_1_second.clone(),
+                metadata: None,
+                parent: Some(root_iter_1.clone()),
+                start: (),
+            },
+            ProfileEntry::Publish {
+                id: child_iter_1_second,
+                result: [3.0, 30.0],
+            },
+            ProfileEntry::Publish {
+                id: root_iter_1,
+                result: [10.0, 100.0],
+            },
+            ProfileEntry::Register {
+                id: root_iter_2.clone(),
+                metadata: None,
+                parent: None,
+                start: (),
+            },
+            ProfileEntry::Register {
+                id: child_iter_2.clone(),
+                metadata: None,
+                parent: Some(root_iter_2.clone()),
+                start: (),
+            },
+            ProfileEntry::Publish {
+                id: child_iter_2,
+                result: [7.0, 70.0],
+            },
+            ProfileEntry::Publish {
+                id: root_iter_2,
+                result: [10.0, 100.0],
+            },
+        ];
+
+        let report = AnalyzedReport::from_profile_entries(
+            &entries,
+            Arc::new(TestMetrics),
+            None,
+            "bench".to_string(),
+        );
+        let child = node(&report, &["unknown", "unknown"]);
+        let stats = compute_metric_stats_for_samples(&child.samples, 2);
+
+        assert_eq!(child.samples, vec![vec![5.0, 50.0], vec![7.0, 70.0]]);
+        assert_eq!(stats[0].mean, 6.0);
+        assert_eq!(stats[1].mean, 60.0);
+    }
+
+    #[test]
+    fn uses_metric_aggregation_kind_for_repeated_inner_events() {
+        let report = report_from_outer_iters_with_metrics(
+            Arc::new(PeakMetrics),
+            vec![
+                vec![
+                    (vec!["root"], [10.0, 100.0]),
+                    (vec!["root", "child"], [2.0, 20.0]),
+                    (vec!["root", "child"], [3.0, 30.0]),
+                ],
+                vec![
+                    (vec!["root"], [10.0, 90.0]),
+                    (vec!["root", "child"], [7.0, 70.0]),
+                ],
+            ],
+        );
+
+        let child = node(&report, &["root", "child"]);
+
+        assert_eq!(child.samples, vec![vec![5.0, 30.0], vec![7.0, 70.0]]);
     }
 }

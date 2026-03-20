@@ -111,7 +111,7 @@ Checkout [benches](benches) for more examples, and [docs](https://docs.rs/profil
 
 ## TODO:
 - [x] Add more system metrics (memory usage, cache misses, etc);
-- [ ] Show example of memory allocator metric usage.
+- [x] Show example of memory allocator metric usage.
 - [x] Implement "calculated" metrics, that can be calculated from other metrics (e.g. cpu-off-time = wall-time - task-time);
 - [ ] Add example of using custom metrics;
 - [ ] Implement collector that sends metrics with `tracing_subscriber` or `metrics` or channel to some external system, to use it in production;

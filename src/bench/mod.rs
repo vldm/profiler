@@ -627,7 +627,7 @@ where
 /// ```
 ///
 /// This will expand in something simiar to:
-/// ```
+/// ```rust,ignore
 /// # #[allow(clippy::needless_doctest_main)]
 /// fn main() {
 ///   use profiler::bench::*;

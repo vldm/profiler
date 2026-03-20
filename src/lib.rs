@@ -6,7 +6,7 @@
 //! ## Bencher and profiler in one place
 //!  
 //! Imagine having crate with some defined pipeline:
-//! ```rust,no_build
+//! ```rust,ignore
 //! fn pipeline(data: &[u8]) -> Vec<u8> {
 //!    serialize(process(parse(data)))
 //! }
@@ -27,7 +27,9 @@
 //! This aproach envolves a lot of duplication and boilerplates, and also enforces to expose some private api (input/output of pipeline phases).
 //!
 //! Instead one can use [`profiler`] and simplify the process:
-//! ```
+//! ```rust,no_run
+//! use profiler::Metrics;
+//!
 //! // Instrument functions that want to observe using `tracing::instrument`
 //! #[tracing::instrument(skip_all)]
 //! fn parse(data: &[u8]) -> Vec<u32> {
@@ -98,17 +100,20 @@ pub use crate::metrics::{
 /// In example below, `cycles` field will be initialized with `PerfEventMetric::new(perf_event::events::Hardware::CPU_CYCLES)`.
 ///
 /// # Example:
-/// ```
+/// ```rust
+/// use profiler::{InstantProvider, Metrics, PerfEventMetric};
+/// use profiler::metrics::perf_event;
+///
 /// #[derive(Metrics)]
 /// pub struct MetricsProvider {
 ///    /// Without `#[new]` attribute, the metric will be initialized with `Default::default()`.
 ///    /// wall_time can be gathered from Instant or from perf_event(CPU_CLOCK), result is similar,
 ///    /// but Instant is more portable.
-///    pub wall_time: crate::InstantProvider,
+///    pub wall_time: InstantProvider,
 ///    /// CPU cycles spent in the span.
 ///    /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
 ///    #[new(perf_event::events::Hardware::CPU_CYCLES)]
-///    pub cycles: crate::PerfEventMetric,
+///    pub cycles: PerfEventMetric,
 /// }
 /// ```
 ///
@@ -122,12 +127,15 @@ pub use crate::metrics::{
 /// `#[config]` attribute allows to customize display options for each metric, see [`MetricReportInfo`] for more details.
 ///
 /// # Example:
-/// ```
+/// ```rust
+/// use profiler::{Metrics, PerfEventMetric};
+/// use profiler::metrics::perf_event;
+///
 /// #[derive(Metrics)]
 /// pub struct MetricsProvider {
 ///     #[new(perf_event::events::Hardware::CPU_CYCLES)]
 ///     #[config(show_spread = false)]
-///     pub cycles: crate::PerfEventMetric,
+///     pub cycles: PerfEventMetric,
 /// }
 /// ```
 ///

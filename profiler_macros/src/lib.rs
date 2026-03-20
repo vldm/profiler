@@ -123,7 +123,7 @@ fn derive_metrics_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
 
         let mut config_builder = vec![];
         for (name, value) in configs.into_iter().flatten() {
-            let configs = ["show_spread", "show_baseline"];
+            let configs = ["show_spread", "show_baseline", "aggregation"];
             if !configs.contains(&name.to_string().as_str()) {
                 return Err(syn::Error::new(
                     name.span(),
