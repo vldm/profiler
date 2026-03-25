@@ -11,6 +11,7 @@ use super::{InstantProvider, SingleMetric, format_unit_helper};
 /// Uses `perf_event` crate to capture various hardware/software events like CPU cycles, instructions, cache misses, task clock and many others.
 /// Metrics are captured at span enter/exit by reading corresponding `perf_event` counter for current thread, and calculating difference between them.
 ///
+#[derive(Debug)]
 pub struct PerfEventMetric {
     kind: perf_event::events::Event,
     // metrics are unique per thread/

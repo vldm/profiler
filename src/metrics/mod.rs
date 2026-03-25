@@ -53,12 +53,20 @@
 use std::{fmt::Debug, time::Instant};
 
 #[cfg(feature = "perf_event")]
-pub use perf::{perf_event, PerfEventMetric};
+pub use perf::{PerfEventMetric, perf_event};
 #[cfg(feature = "libc")]
 pub use rusage::{RusageKind, RusageMetric};
 
-pub mod mem;
+#[cfg(feature = "kperf")]
+pub use kperf_impl::{KperfMetric, kperf};
 
+pub use system::{Event as SystemEvent, SystemPerfMetric};
+
+pub mod mem;
+mod system;
+
+#[cfg(feature = "kperf")]
+mod kperf_impl;
 #[cfg(feature = "perf_event")]
 mod perf;
 #[cfg(feature = "libc")]

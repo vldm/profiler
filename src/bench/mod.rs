@@ -520,13 +520,11 @@ where
     where
         M::Result: serde::Serialize,
     {
-        std::thread::spawn(move || {
-            #[cfg(feature = "libc")]
-            pin_current_thread().unwrap();
+        let _ = std::thread::spawn(move || {
+            try_pin_current_thread();
             self.start_inner()
         })
-        .join()
-        .unwrap();
+        .join();
     }
     fn start_inner(mut self)
     where
@@ -665,21 +663,12 @@ macro_rules! bench_main {
     }
 }
 
-#[cfg(feature = "libc")]
-fn pin_current_thread() -> std::io::Result<()> {
-    unsafe {
-        let cpus = num_cpus::get();
-        let cpu = (cpus + 2) % cpus; // third cpu if there are more than 2, otherwise the same cpu
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        libc::CPU_SET(cpu, &mut set);
+fn try_pin_current_thread() {
+    let core_ids = core_affinity::get_core_ids().unwrap();
+    let cpus = core_ids.len();
+    let cpu = (cpus + 2) % cpus; // third cpu if there are more than 2, otherwise the same cpu
 
-        let ret = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(())
+    core_affinity::set_for_current(core_ids[cpu]);
 }
 
 #[cfg(test)]

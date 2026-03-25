@@ -17,12 +17,10 @@ static ALLOCATOR: profiler::metrics::mem::ProfileAllocator =
 /// Defines custom metrics for the benchmark.
 #[derive(Metrics)]
 struct MyMetrics {
-
-    #[cfg(feature = "perf_event")]
     /// CPU cycles spent in the span.
     /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
-    #[new(perf_event::events::Hardware::CPU_CYCLES)]
-    pub cycles: profiler::PerfEventMetric,
+    #[new(profiler::metrics::SystemEvent::Cycles)]
+    pub cycles: profiler::metrics::SystemPerfMetric,
 
     ///
     /// Metrics can be marked as #[hidden], so they will be collected but not used in report.
@@ -37,15 +35,8 @@ struct MyMetrics {
     pub mem_peak: usize,
 }
 impl MyMetrics {
-
-    #[cfg(feature = "perf_event")]
     fn calculate_peak(result: &<MyMetrics as Metrics>::Result) -> usize {
         let mem = &result.1;
-        mem.peak_bytes
-    }
-
-    fn calculate_peak(result: &<MyMetrics as Metrics>::Result) -> usize {
-        let mem = &result.0;
         mem.peak_bytes
     }
 }

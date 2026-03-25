@@ -6,13 +6,12 @@ use profiler_macros::Metrics;
 #[derive(Metrics)]
 #[crate_path(crate)]
 pub struct MetricsProvider {
-    #[cfg(feature = "perf_event")]
     /// CPU cycles spent in the span.
     /// The first metric in the list will be used as the primary metric and adds report of %parent in the report.
-    #[new(perf_event::events::Hardware::CPU_CYCLES)]
-    #[config(show_spread = false)]
-    pub cycles: crate::PerfEventMetric,
 
+    #[new(crate::metrics::SystemEvent::Cycles)]
+    #[config(show_spread = false)]
+    pub cycles: crate::metrics::SystemPerfMetric,
 
     #[cfg(feature = "perf_event")]
     /// Time spent on CPU for specific thread.
@@ -21,11 +20,9 @@ pub struct MetricsProvider {
     #[new(perf_event::events::Software::TASK_CLOCK)]
     pub task_clock: crate::PerfEventMetric,
 
-
-    #[cfg(feature = "perf_event")]
-    #[new(perf_event::events::Hardware::INSTRUCTIONS)]
+    #[new(crate::metrics::SystemEvent::Instructions)]
     #[config(show_spread = false)]
-    pub instructions: crate::PerfEventMetric,
+    pub instructions: crate::metrics::SystemPerfMetric,
 
     /// Without `#[new]` attribute, the metric will be initialized with `Default::default()`.
     /// wall_time can be gathered from Instant or from perf_event(CPU_CLOCK), result is similar,
@@ -36,8 +33,6 @@ pub struct MetricsProvider {
     #[config(show_spread = false, show_baseline = false)]
     pub wall_time: crate::InstantProvider,
 
-
-    #[cfg(feature = "perf_event")]
     /// raw_end_fn is embedded as is, so the type of state should be specifiend.
     /// But if field result types are copy, they can be used dirrectly (without macro hiegiene).
     /// #[raw_end_fn(|state: &<MetricsProvider as crate::Metrics>::Result| state.2 as f64 / state.0 as f64 )]
@@ -52,12 +47,16 @@ pub struct MetricsProvider {
     // pub system_time: crate::RusageMetric,
 }
 
-#[cfg(feature = "perf_event")]
 //
 // TODO: generate structure for Result object (with named fields instead of indexes).
 //
 fn calculate_ipc(result: &<MetricsProvider as crate::Metrics>::Result) -> f64 {
+    // task_clock shifts indexes
+    #[cfg(feature = "perf_event")]
     let instructions = result.2;
+    #[cfg(not(feature = "perf_event"))]
+    let instructions = result.1;
+
     let cycles = result.0;
     if cycles == 0 {
         0.0
