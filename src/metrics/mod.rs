@@ -52,13 +52,14 @@
 //! *Note: Both traits implementors should be thread-safe.*
 use std::{fmt::Debug, time::Instant};
 
-pub use perf::PerfEventMetric;
+#[cfg(feature = "perf_event")]
+pub use perf::{perf_event, PerfEventMetric};
+#[cfg(feature = "libc")]
 pub use rusage::{RusageKind, RusageMetric};
 
-/// Re-export of perf event crate suitable for construction PerfEventMetric in `#[new(...)]` attribute of `Metrics` derive macro.
-pub use perf_event;
-
 pub mod mem;
+
+#[cfg(feature = "perf_event")]
 mod perf;
 #[cfg(feature = "libc")]
 mod rusage;

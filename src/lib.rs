@@ -85,9 +85,13 @@ use std::{
 use tracing::{Id, Metadata};
 
 pub use crate::metrics::{
-    InstantProvider, Metrics, PerfEventMetric, RusageKind, RusageMetric, SingleMetric,
+    InstantProvider, Metrics,  SingleMetric,
     format_unit_helper,
 };
+#[cfg(feature = "libc")]
+pub use crate::metrics::{RusageKind, RusageMetric};
+#[cfg(feature = "perf_event")]
+pub use crate::metrics::{PerfEventMetric};
 
 /// Derive macros for [`Metrics`] trait.
 ///

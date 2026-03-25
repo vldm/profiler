@@ -13,7 +13,7 @@ repository = "https://github.com/vldm/profiler"
 [dependencies]
 tracing = "0.1.44"
 tracing-subscriber = "0.3"
-perf-event = "0.4.9"
+perf-event = {version = "0.4.9", optional = true}
 thread_local = "1.1.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -24,8 +24,9 @@ profiler_macros = { version = "0.1.2", path = "profiler_macros" }
 
 
 [features]
-default = ["libc"]
+default = []
 libc = ["dep:libc", "dep:num_cpus"]
+perf_event = ["dep:perf-event"]
 
 [[bench]]
 name = "easy"

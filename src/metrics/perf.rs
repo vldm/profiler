@@ -2,6 +2,9 @@ use perf_event::Counter;
 use std::cell::RefCell;
 use thread_local::ThreadLocal;
 
+/// Re-export of perf event crate suitable for construction PerfEventMetric in `#[new(...)]` attribute of `Metrics` derive macro.
+pub use perf_event;
+
 use super::{InstantProvider, SingleMetric, format_unit_helper};
 /// `perf_event` based metrics.
 ///
