@@ -41,7 +41,6 @@ use std::{alloc::GlobalAlloc, cell::RefCell, mem::ManuallyDrop};
 
 use crate::SingleMetric;
 use serde::{Deserialize, Serialize};
-
 pub fn format_bytes(value: f64) -> (String, &'static str) {
     if value >= 1024.0 * 1024.0 * 1024.0 {
         return (
