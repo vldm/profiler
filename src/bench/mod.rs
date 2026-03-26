@@ -521,7 +521,7 @@ where
         M::Result: serde::Serialize,
     {
         #[cfg(feature = "auto_sudo")]
-        if sudo::check() != sudo::RunningAs::Root {
+        if sudo::check() != sudo::RunningAs::Root && cfg!(feature = "kperf") {
             eprintln!(
                 "\x1b[31mStarting benchmark with sudo privileges (profiler::auto_sudo feature enabled)\n\
             Root privileges are required for MacOS::kperf, make sure that your benchmark code is trusted.\x1b[0m"
