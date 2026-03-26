@@ -9,6 +9,7 @@
 //! Note: kperf require root permissions.
 //!
 
+#[cfg(feature = "kperf")]
 use crate::metrics::{KperfMetric, kperf};
 
 /// Common system performance metrics, like CPU cycles, instructions, branches and branch misses.

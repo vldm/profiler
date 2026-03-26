@@ -54,7 +54,7 @@ fn calculate_ipc(result: &<MetricsProvider as crate::Metrics>::Result) -> f64 {
     // task_clock shifts indexes
     #[cfg(feature = "perf_event")]
     let instructions = result.2;
-    #[cfg(not(feature = "perf_event"))]
+    #[cfg(feature = "kperf")]
     let instructions = result.1;
 
     let cycles = result.0;

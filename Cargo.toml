@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "profiler"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-span metrics based profiler and benchmarking library for Rust"
@@ -13,7 +13,7 @@ repository = "https://github.com/vldm/profiler"
 [dependencies]
 tracing = "0.1.44"
 tracing-subscriber = "0.3"
-profiler_macros = { version = "0.1.2", path = "profiler_macros" }
+profiler_macros = { version = "0.2.0", path = "profiler_macros" }
 thread_local = "1.1.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -22,17 +22,27 @@ core_affinity = "0.8.3"
 thiserror = "1.0.40"
 
 libc = { version = "0.2.183", optional = true }
-kperf-sys = { version = "0.0.3", optional = true }
-perf-event = { version = "0.4.9", optional = true }
 sudo = { version = "0.6.0", optional = true }
+
+# if we on macos - link with kperf
+[target.'cfg(target_os = "macos")'.dependencies]
+kperf-sys = { version = "0.0.3", optional = true }
+
+# if we on linux - link with perf-event
+[target.'cfg(target_os = "linux")'.dependencies]
+perf-event = { version = "0.4.9", optional = true }
+
+
 [features]
-default = []
+default = ["auto_detect"]
 # rusage
 libc = ["dep:libc"]
 # macos kperf
 auto_sudo = ["dep:sudo"]
 kperf = ["dep:kperf-sys"]
 perf_event = ["dep:perf-event"]
+# auto detect and enable kperf or perf_event feature (see build.rs)
+auto_detect = ["dep:kperf-sys", "dep:perf-event"]
 
 [[bench]]
 name = "easy"
