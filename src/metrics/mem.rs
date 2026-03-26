@@ -1,6 +1,6 @@
 //! Memory allocation metrics.
 //! This module provides two crucial parts:
-//! 1. implementation of global allocator [`ProfileAllocator`] that tracks different memory metrics  
+//! 1. implementation of global allocator [`ProfileAllocator`] that tracks different memory metrics
 //!    If one want to use memory allocation metrics, they should set global allocator to [`ProfileAllocator`] using `#[global_allocator]` attribute.
 //!
 //! 2. [`ProfilerMetrics`] metric providers that can be used in `#[derive(Metrics)]` macro
@@ -19,7 +19,7 @@
 //! // Define custom metrics set used in benchmark.
 //! #[derive(Metrics)]
 //! struct MemoryMetrics {
-//!   
+//!
 //!    /// Use #[new] to provide a parameter to metric constructor.
 //!    #[new(&ALLOCATOR)]
 //!    pub memprofiler: ProfilerMetrics,
@@ -42,7 +42,21 @@ use std::{alloc::GlobalAlloc, cell::RefCell, mem::ManuallyDrop};
 use crate::SingleMetric;
 use serde::{Deserialize, Serialize};
 
-fn format_bytes(value: f64) -> (String, &'static str) {
+pub fn format_bytes(value: f64) -> (String, &'static str) {
+    if value >= 1024.0 * 1024.0 * 1024.0 {
+        return (
+            format!("{value:.2}", value = value / (1024.0 * 1024.0 * 1024.0)),
+            "GB",
+        );
+    } else if value >= 1024.0 * 1024.0 {
+        return (
+            format!("{value:.2}", value = value / (1024.0 * 1024.0)),
+            "MB",
+        );
+    } else if value >= 1024.0 {
+        return (format!("{value:.2}", value = value / 1024.0), "KB");
+    }
+
     (format!("{value:.2}"), "bytes")
 }
 
@@ -66,7 +80,7 @@ fn format_bytes(value: f64) -> (String, &'static str) {
 /// ```
 /// This metrics provide a rich result information [`FrameInfo`] that can be used by other metrics, to calculate more specific metrics, like peak live memory.
 /// Check out module [`mem`] or benchmark `macro_extended` for more details.
-///  
+///
 /// <div class="warning">
 /// Note: Not all memory metrics are additive, e.g. peak memory should not be sumarized across inner iterations,
 ///  so one should set `aggregation = MetricAggregation::Max` for such metrics to get correct results in report.
@@ -120,7 +134,9 @@ impl FrameInfo {
     fn mark_alloced(&mut self, num_bytes: usize) {
         self.alloced_bytes += num_bytes;
         self.num_allocs += 1;
-        self.peak_bytes = self.peak_bytes.max(self.alloced_bytes - self.freed_bytes);
+        self.peak_bytes = self
+            .peak_bytes
+            .max(self.alloced_bytes.saturating_sub(self.freed_bytes));
     }
     fn mark_freed(&mut self, num_bytes: usize) {
         self.freed_bytes += num_bytes;
