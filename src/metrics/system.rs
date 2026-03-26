@@ -1,10 +1,15 @@
 //!
-//! Abstraction over pef and kperf apis.
+//! Abstraction over pef and kperf APIs.
 //!
 //! Kperf is a low-level API for macOS.
 //! Perf is a low-level API for Linux.
+//!
+//! Do nothing if both kperf and perf_event features are not enabled.
+//!
+//! Note: kperf require root permissions.
+//!
 
-use crate::metrics::KperfMetric;
+use crate::metrics::{KperfMetric, kperf};
 
 /// Common system performance metrics, like CPU cycles, instructions, branches and branch misses.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -50,19 +55,22 @@ compile_error!("Cannot enable both kperf and perf_event features at the same tim
 
 #[cfg(feature = "kperf")]
 impl crate::SingleMetric for SystemPerfMetric {
+    // Save result as is, but "demultiplex" result - to make it compatible with perf_event based implementation.
     type Start = <KperfMetric as crate::SingleMetric>::Start;
-    type Result = <KperfMetric as crate::SingleMetric>::Result;
+    type Result = u64;
 
     fn start(&self) -> Self::Start {
         self.kperf.start()
     }
     fn end(&self, start: Self::Start) -> Self::Result {
-        self.kperf.end(start)
+        self.kperf.end(start).for_event(self.kperf.ev)
     }
     fn result_to_f64(&self, result: &Self::Result) -> f64 {
-        self.kperf.result_to_f64(result)
+        *result as f64
     }
 }
+
+// TODO: Support multiplexing for perf_event
 
 #[cfg(feature = "perf_event")]
 impl crate::SingleMetric for SystemPerfMetric {

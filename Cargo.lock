@@ -38,16 +38,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
-name = "kperf"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d1c1a66f7fdb5a1a8227c250f71f430703e22a13f482436c66db9a01863658"
-dependencies = [
- "kperf-sys",
- "thiserror",
-]
-
-[[package]]
 name = "kperf-sys"
 version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -145,12 +135,14 @@ name = "profiler"
 version = "0.1.4"
 dependencies = [
  "core_affinity",
- "kperf",
+ "kperf-sys",
  "libc",
  "perf-event",
  "profiler_macros",
  "serde",
  "serde_json",
+ "sudo",
+ "thiserror",
  "thread_local",
  "tracing",
  "tracing-subscriber",
@@ -231,6 +223,16 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "sudo"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88bd84d4c082e18e37fef52c0088e4407dabcef19d23a607fb4b5ee03b7d5b83"
+dependencies = [
+ "libc",
+ "log",
+]
 
 [[package]]
 name = "syn"

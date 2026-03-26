@@ -520,6 +520,16 @@ where
     where
         M::Result: serde::Serialize,
     {
+        #[cfg(feature = "auto_sudo")]
+        if sudo::check() != sudo::RunningAs::Root {
+            eprintln!(
+                "\x1b[31mStarting benchmark with sudo privileges (profiler::auto_sudo feature enabled)\n\
+            Root privileges are required for MacOS::kperf, make sure that your benchmark code is trusted.\x1b[0m"
+            );
+            std::thread::sleep(Duration::from_secs(2));
+            sudo::with_env(&["CARGO_", "OUT_DIR", "RUST"]).unwrap();
+        }
+
         let _ = std::thread::spawn(move || {
             try_pin_current_thread();
             self.start_inner()

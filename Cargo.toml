@@ -19,16 +19,20 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 
 core_affinity = "0.8.3"
+thiserror = "1.0.40"
 
 libc = { version = "0.2.183", optional = true }
-kperf = { version = "0.1.0", optional = true }
+kperf-sys = { version = "0.0.3", optional = true }
 perf-event = { version = "0.4.9", optional = true }
+sudo = { version = "0.6.0", optional = true }
 [features]
-default = ["kperf"]
+default = []
 # rusage
 libc = ["dep:libc"]
+# macos kperf
+auto_sudo = ["dep:sudo"]
+kperf = ["dep:kperf-sys"]
 perf_event = ["dep:perf-event"]
-kperf = ["dep:kperf"]
 
 [[bench]]
 name = "easy"
